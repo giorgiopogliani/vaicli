@@ -1,4 +1,4 @@
-name: Release
+name: Bump
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
       - main
 
 jobs:
-  release:
+  bump:
     runs-on: ubuntu-latest
 
     permissions:
