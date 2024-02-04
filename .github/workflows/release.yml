@@ -1,0 +1,35 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '*.*.*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      repository-projects: write
+    steps:
+    - uses: actions/checkout@v2
+
+    - uses: php-actions/composer@v6
+      with:
+        php_version: "8.3"
+        version: 2
+        dev: no
+        args: --profile --ignore-platform-reqs --no-ansi --no-interaction --no-progress --no-scripts --optimize-autoloader
+
+    - name: Build
+      run: php application app:build --build-version=${{ github.ref_name }}
+
+    - uses: "marvinpinto/action-automatic-releases@latest"
+      with:
+        repo_token: "${{ secrets.GITHUB_TOKEN }}"
+        automatic_release_tag: "${{ github.ref_name }}"
+        prerelease: false
+        title: "${{ github.ref_name }}"
+        files: |
+          builds/application
