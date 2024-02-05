@@ -34,19 +34,22 @@ class RunCommand extends Command
             exit(1);
         }
 
-
-        $fullCommand = $command->command . ' ' . implode(' ', $arguments);
-
         $variables = collect($file->variables)->mapWithKeys(function ($var) {
             return [$var->name => $var->value];
         });
 
-        // find all pattern like $(variable_name) and replace them with the value
-        $fullCommand = preg_replace_callback('/\$\(([^)]+)\)/', function ($matches) use ($variables) {
-            return $variables[$matches[1]] ?? $matches[0];
-        }, $fullCommand);
+        $fullCommand = [
+            ...explode(' ', $command->command),
+            ...$arguments
+        ];
 
-        render("<p><span>Running '{$command->name}' command:</span> <span class='italic'>{$fullCommand}</span></p>");
+        for ($i = 0; $i < count($fullCommand); $i++) {
+            $fullCommand[$i] = preg_replace_callback('/\$\(([^)]+)\)/', function ($matches) use ($variables) {
+                return $variables[$matches[1]] ?? $matches[0];
+            }, $fullCommand[$i]);
+        }
+
+        render("<p><span>Running '{$command->name}' command:</span> <span class='italic'>{$command->command} \$args</span></p>");
 
         Process::forever()->tty()->run($fullCommand);
     }
