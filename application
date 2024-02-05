@@ -33,7 +33,7 @@ $app = require_once __DIR__.'/bootstrap/app.php';
 $kernel = $app->make(Illuminate\Contracts\Console\Kernel::class);
 
 $input = new Symfony\Component\Console\Input\ArgvInput();
-$input->getFirstArgument() == 'app:build' ? $input : new App\ArgvInput();
+$input = $input->getFirstArgument() == 'app:build' ? $input : new App\ArgvInput();
 
 $status = $kernel->handle(
     $input,
