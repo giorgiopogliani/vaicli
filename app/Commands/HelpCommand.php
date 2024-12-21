@@ -38,10 +38,6 @@ class HelpCommand extends Command
             HTML);
         } else {
             render(<<<HTML
-            Env:
-            HTML);
-
-            render(<<<HTML
             <p>
                 <strong>Usage: vai [command] [arguments] </strong><br><br>
                 <i>PROJECT</i>: <span>{$project}</span><br>
