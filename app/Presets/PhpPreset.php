@@ -19,7 +19,7 @@ class PhpPreset
             new VaiCommand(
                 name: 'composer',
                 description: 'Run composer inside the container',
-                command: 'docker exec -it ${CONTAINER} composer'
+                command: 'vai exec composer'
             )
         ];
     }
