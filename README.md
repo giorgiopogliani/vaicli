@@ -6,7 +6,7 @@ This a simple cli to manage and run project specific aliases.
 
 Make sure you have PHP 8.3 installed on your system and then run: 
 ```bash
-curl -o /usr/local/bin/vai -fsSL https://github.com/giorgiopogliani/vaicli/releases/download/0.1.0/application && chmod +x /usr/local/bin/vai
+curl -o /usr/local/bin/vai -fsSL https://github.com/giorgiopogliani/vaicli/releases/download/0.1.1/application && chmod +x /usr/local/bin/vai
 ```
 
 ## Usage
