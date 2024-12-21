@@ -1,0 +1,26 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Presets;
+
+use App\VaiCommand;
+
+class PhpPreset
+{
+    public static function shouldLoad(): bool
+    {
+        return file_exists(getcwd() . '/composer.json');
+    }
+
+    public function getCommands(): array
+    {
+        return [
+            new VaiCommand(
+                name: 'composer',
+                description: 'Run composer inside the container',
+                command: 'docker exec -it ${CONTAINER} composer'
+            )
+        ];
+    }
+}

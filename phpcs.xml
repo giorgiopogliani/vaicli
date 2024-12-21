@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<ruleset xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" name="PHP_CodeSniffer"
+    xsi:noNamespaceSchemaLocation="phpcs.xsd">
+    <file>app</file>
+
+    <rule ref="PSR1.Methods.CamelCapsMethodName">
+        <exclude-pattern>./tests/*</exclude-pattern>
+    </rule>
+
+    <rule ref="PSR12">
+        <exclude name="PSR12.Classes.ClassInstantiation.MissingParentheses" />
+        <exclude name="PSR12.Traits.UseDeclaration.MultipleImport" />
+        <exclude name="PEAR.Functions.FunctionDeclaration" />
+        <exclude name="Squiz.WhiteSpace.ScopeClosingBrace" />
+        <exclude name="Squiz.Functions.MultiLineFunctionDeclaration" />
+    </rule>
+
+    <rule ref="Generic.Arrays.DisallowLongArraySyntax" />
+
+   <rule name="Squiz.Arrays.ArrayDeclaration.ValueNotAligned" />
+</ruleset>

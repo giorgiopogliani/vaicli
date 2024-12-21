@@ -1,6 +1,6 @@
 <?php
 
-use App\Commands\RunCommand;
+use App\Commands\HelpCommand;
 
 return [
 
@@ -15,7 +15,7 @@ return [
     |
     */
 
-    'default' => RunCommand::class,
+    'default' => HelpCommand::class,
 
     /*
     |--------------------------------------------------------------------------

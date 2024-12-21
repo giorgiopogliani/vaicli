@@ -1,6 +1,12 @@
 #!/usr/bin/env php
 <?php
 
+use App\Presets\CraftPreset;
+use App\Presets\DockerPreset;
+use App\Presets\LaravelPreset;
+use App\Presets\PhpPreset;
+use App\Vai;
+
 define('LARAVEL_START', microtime(true));
 
 /*
@@ -30,10 +36,17 @@ $app = require_once __DIR__.'/bootstrap/app.php';
 |
 */
 
+/** @var LaravelZero\Framework\Kernel $kernel */
 $kernel = $app->make(Illuminate\Contracts\Console\Kernel::class);
 
 $input = new Symfony\Component\Console\Input\ArgvInput();
-$input = $input->getFirstArgument() == 'app:build' ? $input : new App\ArgvInput();
+
+$vai = new Vai();
+$vai->addPreset(DockerPreset::class);
+$vai->addPreset(PhpPreset::class);
+$vai->addPreset(CraftPreset::class);
+$vai->addPreset(LaravelPreset::class);
+$vai->load($kernel);
 
 $status = $kernel->handle(
     $input,
