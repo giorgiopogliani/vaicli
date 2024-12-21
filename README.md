@@ -42,6 +42,9 @@ I have included a few presets that load automatically based on the project files
 - Laravel: artisan exec alias
 - Craft Cms: craft exec alias and restore db alias
 
+> [!NOTE]  
+> These presets will assume you have a `PROJECT` and a `CONTAINER` env variable. 
+
 ## License
 
 The MIT License (MIT). Please see [License File](LICENSE.md) for more information.
