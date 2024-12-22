@@ -33,12 +33,12 @@ class DockerPreset
            ),
            new VaiCommand(
                name: 'start',
-               description: 'Build and start the container',
+               description: 'Start the container',
                command: 'docker compose -p ${PROJECT} start'
            ),
            new VaiCommand(
                name: 'stop',
-               description: 'Stop and remove the container',
+               description: 'Stop the container',
                command: 'docker compose -p ${PROJECT} stop'
            ),
            new VaiCommand(
@@ -48,7 +48,7 @@ class DockerPreset
            ),
            new VaiCommand(
                name: 'exec',
-               description: 'Exec command inside the app container',
+               description: 'Run given command inside the container',
                command: 'docker exec -it ${CONTAINER}'
            ),
            new VaiCommand(

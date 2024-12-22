@@ -10,7 +10,7 @@ class LaravelPreset
 {
     public static function shouldLoad(): bool
     {
-        return file_exists(getcwd() . '/artisan');
+        return DockerPreset::shouldLoad() && file_exists(getcwd() . '/artisan');
     }
 
     public function getCommands(): array

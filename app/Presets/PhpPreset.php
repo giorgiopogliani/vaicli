@@ -10,7 +10,7 @@ class PhpPreset
 {
     public static function shouldLoad(): bool
     {
-        return file_exists(getcwd() . '/composer.json');
+        return DockerPreset::shouldLoad() && file_exists(getcwd() . '/composer.json');
     }
 
     public function getCommands(): array

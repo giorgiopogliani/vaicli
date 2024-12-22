@@ -10,7 +10,7 @@ class CraftPreset
 {
     public static function shouldLoad(): bool
     {
-        return file_exists(getcwd() . '/craft');
+        return DockerPreset::shouldLoad() && file_exists(getcwd() . '/craft');
     }
 
     public function getCommands(): array
@@ -23,8 +23,8 @@ class CraftPreset
            ),
            new VaiCommand(
                name: 'restore',
-               description: 'Restore the database from config/db/seed.sql.zip',
-               command: 'vai exec php craft db/restore config/db/seed.sql.zip'
+               description: 'Restore the database from given path',
+               command: 'vai exec php craft db/restore'
            )
         ];
     }
