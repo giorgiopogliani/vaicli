@@ -20,7 +20,7 @@ pub fn run(self: *const App, args: *std.process.ArgIterator) !void {
 
     if (command) |cmd| {
         if (self.config.tasks.map.get(cmd)) |task| {
-            try task.run(self.allocator, self.env);
+            try task.run(self.allocator, self.env, args);
         } else {
             self.help();
         }
