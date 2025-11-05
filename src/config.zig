@@ -8,9 +8,12 @@ const Task = struct {
 
     pub fn run(self: *const Task, allocator: std.mem.Allocator, env: *Env, args: *std.process.ArgIterator) !void {
         var command = try std.mem.concat(allocator, u8, &[_][]const u8{ self.command, " " });
+        defer allocator.free(command);
 
         while (args.next()) |arg| {
+            const old_command = command;
             command = try std.mem.concat(allocator, u8, &[_][]const u8{ command, " ", arg });
+            allocator.free(old_command);
         }
 
         std.debug.print("{s}", .{command});
