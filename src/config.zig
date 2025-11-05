@@ -1,0 +1,20 @@
+const std = @import("std");
+const toml = @import("toml");
+const Env = @import("env.zig");
+
+const Task = struct {
+    description: []const u8,
+    command: []const u8,
+
+    pub fn run(self: *const Task, allocator: std.mem.Allocator, env: *Env) !void {
+        std.debug.print("  {s}\n", .{self.command});
+        var child = std.process.Child.init(&[_][]const u8{ "env", "bash", "-c", self.command }, allocator);
+        child.env_map = &env.map;
+        try child.spawn();
+        _ = try child.wait();
+    }
+};
+
+const Config = @This();
+
+tasks: toml.HashMap(Task),

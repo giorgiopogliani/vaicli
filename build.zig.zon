@@ -1,0 +1,19 @@
+.{
+    .name = .vai,
+    .version = "0.1.0",
+    .description = "Context-aware Docker Compose shortcuts for various development environments",
+    .fingerprint = 0xe7b54eeaa6ba0b65,
+    .minimum_zig_version = "0.15.1",
+    .dependencies = .{
+        .toml = .{
+            .url = "git+https://github.com/sam701/zig-toml#3aaeb0bf14935eabae118196f7949b404a42f8ea",
+            .hash = "toml-0.3.0-bV14BTd8AQA-wZERtB3dvRE3eSZ-m48AyXFUGkZ_Tm3d",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+    },
+}

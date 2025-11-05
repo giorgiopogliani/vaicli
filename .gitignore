@@ -1,0 +1,4 @@
+test.toml
+.zig-cache
+.env
+zig-out
