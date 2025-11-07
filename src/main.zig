@@ -21,6 +21,16 @@ pub fn main() anyerror!void {
     // Loading Dotenv file if it exists
     var env = Env.init(allocator);
     defer env.deinit();
+    
+    // Inherit parent process environment
+    var parent_env = try std.process.getEnvMap(allocator);
+    defer parent_env.deinit();
+    var parent_it = parent_env.iterator();
+    while (parent_it.next()) |entry| {
+        try env.map.put(entry.key_ptr.*, entry.value_ptr.*);
+    }
+    
+    // Override with .env file values
     env.parseFile(".env") catch {};
 
     // Parse command line arguments

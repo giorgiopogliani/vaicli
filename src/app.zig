@@ -1,6 +1,7 @@
 const std = @import("std");
 const Env = @import("env.zig");
 const Config = @import("config.zig");
+const Color = @import("colors.zig");
 const App = @This();
 
 allocator: std.mem.Allocator,
@@ -20,7 +21,7 @@ pub fn run(self: *const App, args: *std.process.ArgIterator) !void {
 
     if (command) |cmd| {
         if (self.config.tasks.map.get(cmd)) |task| {
-            try task.run(self.allocator, self.env, args);
+            try task.run(self.allocator, self.env, cmd, args);
         } else {
             self.help();
         }
@@ -35,6 +36,7 @@ pub fn help(self: *const App) void {
     var copy = self.config.tasks.map.iterator();
 
     while (copy.next()) |entry| {
-        std.debug.print("  {s}: {s}\n", .{ entry.key_ptr.*, entry.value_ptr.*.description });
+        Color.bold(" {s}: ", .{entry.key_ptr.*});
+        Color.normal("{s}.", .{entry.value_ptr.*.description});
     }
 }
