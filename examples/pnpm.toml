@@ -1,0 +1,24 @@
+[preset]
+rules = [
+  { when_file = "pnpm-lock.yaml" }
+]
+
+[tasks.install]
+description = "Install dependencies"
+command = "pnpm install"
+alias = "i"
+
+[tasks.dev]
+description = "Start development server"
+command = "pnpm run dev"
+alias = "d"
+
+[tasks.build]
+description = "Build for production"
+command = "pnpm run build"
+alias = "b"
+
+[tasks.test]
+description = "Run tests"
+command = "pnpm run test"
+alias = "t"

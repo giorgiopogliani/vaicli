@@ -1,0 +1,44 @@
+# Example Docker preset
+# Place this file at: ~/.config/vai/presets/docker.toml
+# This preset is automatically activated when a Dockerfile is present in the current directory
+
+[preset]
+rules = [
+    { when_file = "docker-compose.yml" }
+]
+
+[tasks.compose]
+description = "Run docker compose for the project"
+command = "docker compose -p ${PROJECT:-$CWD}"
+
+[tasks.up]
+description = "Build and start the container"
+command = "docker compose -p ${PROJECT:-$CWD} up -d --build --remove-orphans"
+
+[tasks.down]
+description = "Stop and remove the container"
+command = "docker compose -p ${PROJECT:-$CWD} down"
+
+[tasks.start]
+description = "Start the container"
+command = "docker compose -p ${PROJECT:-$CWD} start"
+
+[tasks.restart]
+description = "Restart the container"
+command = "docker compose -p ${PROJECT:-$CWD} restart"
+
+[tasks.stop]
+description = "Stop the container"
+command = "docker compose -p ${PROJECT:-$CWD} stop"
+
+[tasks.logs]
+description = "View logs from the project"
+command = "docker compose -p ${PROJECT:-$CWD} logs -f -t"
+
+[tasks.exec]
+description = "Run given command inside the container"
+command = "docker compose -p ${PROJECT:-$CWD} exec -e COLUMNS=$(tput cols) -e LINES=$(tput lines) -it app"
+
+[tasks.bash]
+description = "Run bash inside the container"
+command = "docker compose -p ${PROJECT:-$CWD} exec -e COLUMNS=$(tput cols) -e LINES=$(tput lines) -it app bash"

@@ -1,11 +1,9 @@
-# Example global vai configuration
-# Place this file at: ~/.config/vai/vai.toml
-# This file is loaded for all projects
+[preset]
+rules = [
+  { when_file = "build.zig" }
+]
 
 [tasks.build]
 description = "Build the project"
 command = "zig 0.15.2 build"
-
-[tasks.status]
-description = "Show git status"
-command = "git status"
+alias = "b"

@@ -1,0 +1,9 @@
+[preset]
+rules = [
+  { when_file = "docker-compose.yml" },
+  { when_file = "artisan" }
+]
+
+[tasks.artisan]
+description = "Run artisan inside the app container"
+command = "docker compose -p ${PROJECT:-$CWD} exec -i app php artisan"

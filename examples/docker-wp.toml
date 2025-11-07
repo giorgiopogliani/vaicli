@@ -1,0 +1,9 @@
+[preset]
+rules = [
+  { when_file = "docker-compose.yml" },
+  { when_file = "wp-config.php" }
+]
+
+[tasks.wp]
+description = "Run wp cli inside the app container"
+command = "docker compose -p ${PROJECT:-$CWD} exec -e COLUMNS=$(tput cols) -e LINES=$(tput lines) -it app wp --allow-root"

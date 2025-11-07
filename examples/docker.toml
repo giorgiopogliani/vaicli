@@ -1,0 +1,9 @@
+[preset]
+rules = [
+  { when_file = "Dockerfile" }
+]
+
+[tasks.build]
+description = "Build docker image"
+command = "docker build -t myapp ."
+alias = "b"

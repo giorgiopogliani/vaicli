@@ -1,0 +1,9 @@
+[preset]
+rules = [
+  { when_file = "docker-compose.yml" },
+  { when_file = "composer.json" }
+]
+
+[tasks.console]
+description = "Run composer inside the container"
+command = "docker compose -p ${PROJECT:-$CWD} exec -e COLUMNS=$(tput cols) -e LINES=$(tput lines) -it app php bin/console"
