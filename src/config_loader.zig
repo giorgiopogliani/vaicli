@@ -169,20 +169,31 @@ pub const ConfigLoader = struct {
     fn mergeTasks(self: *ConfigLoader, dest: *std.StringHashMap(Config.Task), src: toml.HashMap(Config.Task)) !void {
         var it = src.map.iterator();
         while (it.next()) |entry| {
-            // Duplicate strings so they persist after the parser result is freed
-            const task_name = try self.allocator.dupe(u8, entry.key_ptr.*);
+            // Check if task already exists
+            const gop = try dest.getOrPut(entry.key_ptr.*);
+            
+            if (gop.found_existing) {
+                // Free the old task's strings before replacing
+                self.allocator.free(gop.value_ptr.description);
+                self.allocator.free(gop.value_ptr.command);
+                if (gop.value_ptr.alias) |old_alias| {
+                    self.allocator.free(old_alias);
+                }
+            } else {
+                // New entry, need to duplicate the key
+                gop.key_ptr.* = try self.allocator.dupe(u8, entry.key_ptr.*);
+            }
+            
+            // Duplicate and set the new task values
             const description = try self.allocator.dupe(u8, entry.value_ptr.description);
             const command = try self.allocator.dupe(u8, entry.value_ptr.command);
             const alias = if (entry.value_ptr.alias) |a| try self.allocator.dupe(u8, a) else null;
 
-            const task = Config.Task{
+            gop.value_ptr.* = Config.Task{
                 .description = description,
                 .command = command,
                 .alias = alias,
             };
-
-            // Put will overwrite existing keys, giving us the precedence we want
-            try dest.put(task_name, task);
         }
     }
 };
