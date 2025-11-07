@@ -63,12 +63,20 @@ pub const ConfigLoader = struct {
         const config_path = try std.fs.path.join(self.allocator, &[_][]const u8{ home, ".config", "vai", "vai.toml" });
         defer self.allocator.free(config_path);
 
+        // Check if file exists before trying to parse
+        std.fs.accessAbsolute(config_path, .{}) catch |err| {
+            if (err == error.FileNotFound) return;
+            // File exists but can't be accessed
+            std.debug.print("Warning: Global config file exists at {s} but cannot be accessed: {}\n", .{ config_path, err });
+            return;
+        };
+
         var parser = toml.Parser(RawConfig).init(self.allocator);
         defer parser.deinit();
 
         var result = parser.parseFile(config_path) catch |err| {
-            if (err == error.FileNotFound) return;
-            return err;
+            std.debug.print("Warning: Failed to parse global config file at {s}: {}\n", .{ config_path, err });
+            return;
         };
         defer result.deinit();
 
@@ -76,12 +84,20 @@ pub const ConfigLoader = struct {
     }
 
     fn loadLocalConfig(self: *ConfigLoader, merged_tasks: *std.StringHashMap(Config.Task)) !void {
+        // Check if file exists before trying to parse
+        std.fs.cwd().access("vai.toml", .{}) catch |err| {
+            if (err == error.FileNotFound) return;
+            // File exists but can't be accessed
+            std.debug.print("Warning: Local config file exists at ./vai.toml but cannot be accessed: {}\n", .{err});
+            return;
+        };
+
         var parser = toml.Parser(RawConfig).init(self.allocator);
         defer parser.deinit();
 
         var result = parser.parseFile("vai.toml") catch |err| {
-            if (err == error.FileNotFound) return;
-            return err;
+            std.debug.print("Warning: Failed to parse local config file at ./vai.toml: {}\n", .{err});
+            return;
         };
         defer result.deinit();
 
@@ -110,7 +126,10 @@ pub const ConfigLoader = struct {
             var parser = toml.Parser(RawConfig).init(self.allocator);
             defer parser.deinit();
 
-            var preset_result = parser.parseFile(preset_path) catch continue;
+            var preset_result = parser.parseFile(preset_path) catch |err| {
+                std.debug.print("Warning: Failed to parse preset file at {s}: {}\n", .{ preset_path, err });
+                continue;
+            };
             defer preset_result.deinit();
 
             // Check if preset should be activated
