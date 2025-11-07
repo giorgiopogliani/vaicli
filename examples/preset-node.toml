@@ -1,0 +1,22 @@
+# Example Node.js preset
+# Place this file at: ~/.config/vai/presets/node.toml
+# This preset is automatically activated when package.json is present in the current directory
+
+[preset]
+when_file = "package.json"
+
+[tasks.install]
+description = "Install dependencies"
+command = "npm install"
+
+[tasks.dev]
+description = "Start development server"
+command = "npm run dev"
+
+[tasks.build]
+description = "Build for production"
+command = "npm run build"
+
+[tasks.test]
+description = "Run tests"
+command = "npm test"

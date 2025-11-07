@@ -1,0 +1,22 @@
+# Example Docker preset
+# Place this file at: ~/.config/vai/presets/docker.toml
+# This preset is automatically activated when a Dockerfile is present in the current directory
+
+[preset]
+when_file = "Dockerfile"
+
+[tasks.build]
+description = "Build docker image"
+command = "docker build -t myapp ."
+
+[tasks.up]
+description = "Start docker compose"
+command = "docker compose up -d"
+
+[tasks.down]
+description = "Stop docker compose"
+command = "docker compose down"
+
+[tasks.logs]
+description = "View docker logs"
+command = "docker compose logs -f"

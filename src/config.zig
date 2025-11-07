@@ -3,7 +3,9 @@ const toml = @import("toml");
 const Env = @import("env.zig");
 const Color = @import("colors.zig");
 
-const Task = struct {
+const Config = @This();
+
+pub const Task = struct {
     description: []const u8,
     command: []const u8,
 
@@ -59,6 +61,17 @@ const Task = struct {
     }
 };
 
-const Config = @This();
-
 tasks: toml.HashMap(Task),
+allocator: std.mem.Allocator,
+
+pub fn deinit(self: *Config) void {
+    // Free all task strings
+    var it = self.tasks.map.iterator();
+    while (it.next()) |entry| {
+        self.allocator.free(entry.key_ptr.*);
+        self.allocator.free(entry.value_ptr.description);
+        self.allocator.free(entry.value_ptr.command);
+    }
+    // Free the hashmap itself
+    self.tasks.map.deinit();
+}

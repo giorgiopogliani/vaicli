@@ -3,20 +3,18 @@ const toml = @import("toml");
 const Env = @import("env.zig");
 const App = @import("app.zig");
 const Config = @import("config.zig");
+const ConfigLoader = @import("config_loader.zig").ConfigLoader;
 
 pub fn main() anyerror!void {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Creating parser
-    var parser = toml.Parser(Config).init(allocator);
-    defer parser.deinit();
-
-    // Parsing config
-    var result = try parser.parseFile("test.toml");
-    defer result.deinit();
-    const config = result.value;
+    // Load config with preset support
+    var loader = ConfigLoader.init(allocator);
+    defer loader.deinit();
+    var config = try loader.load();
+    defer config.deinit();
 
     // Loading Dotenv file if it exists
     var env = Env.init(allocator);

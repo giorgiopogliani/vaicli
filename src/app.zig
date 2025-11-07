@@ -37,6 +37,6 @@ pub fn help(self: *const App) void {
 
     while (copy.next()) |entry| {
         Color.bold(" {s}: ", .{entry.key_ptr.*});
-        Color.normal("{s}.", .{entry.value_ptr.*.description});
+        Color.normal("{s}.\n", .{entry.value_ptr.*.description});
     }
 }

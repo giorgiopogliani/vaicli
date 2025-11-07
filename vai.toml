@@ -1,0 +1,7 @@
+[tasks.compose]
+description = "Start the application"
+command = 'docker compose -p ${PROJECT:-$(pwd)}'
+
+[tasks.dev]
+description = "Start the application"
+command = 'pnpm run dev'
