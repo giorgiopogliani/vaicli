@@ -2,7 +2,7 @@
 This a simple cli to manage and run project specific aliases.
 
 ## Usage
-If a `.env` is found in the project all the defined variables are availble.
+If a `.env` is found in the project all the defined variables are availble
 
 ## Config
 You can add commands like this:

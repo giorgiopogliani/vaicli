@@ -10,9 +10,14 @@ pub const ConfigLoader = struct {
         preset: ?PresetMetadata = null,
     };
 
-    pub const PresetMetadata = struct {
+    pub const Rule = struct {
         when_file: ?[]const u8 = null,
         // Future: when_dir, when_env, etc.
+    };
+
+    pub const PresetMetadata = struct {
+        when_file: ?[]const u8 = null,
+        rules: ?[]Rule = null,
     };
 
     pub fn init(allocator: std.mem.Allocator) ConfigLoader {
@@ -118,11 +123,23 @@ pub const ConfigLoader = struct {
     fn shouldActivatePreset(_: *ConfigLoader, preset_meta: ?PresetMetadata) bool {
         const meta = preset_meta orelse return false;
 
-        // Check when_file condition
+        // Check legacy when_file condition for backward compatibility
         if (meta.when_file) |filename| {
             std.fs.cwd().access(filename, .{}) catch {
                 return false;
             };
+            return true;
+        }
+
+        // Check rules array - ALL rules must be satisfied
+        if (meta.rules) |rules| {
+            for (rules) |rule| {
+                if (rule.when_file) |filename| {
+                    std.fs.cwd().access(filename, .{}) catch {
+                        return false;
+                    };
+                }
+            }
             return true;
         }
 
