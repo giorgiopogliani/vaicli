@@ -8,15 +8,19 @@ when_file = "package.json"
 [tasks.install]
 description = "Install dependencies"
 command = "npm install"
+alias = "i"
 
 [tasks.dev]
 description = "Start development server"
 command = "npm run dev"
+alias = "d"
 
 [tasks.build]
 description = "Build for production"
 command = "npm run build"
+alias = "b"
 
 [tasks.test]
 description = "Run tests"
 command = "npm test"
+alias = "t"

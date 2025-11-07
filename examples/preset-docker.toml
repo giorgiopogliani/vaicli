@@ -8,15 +8,19 @@ when_file = "Dockerfile"
 [tasks.build]
 description = "Build docker image"
 command = "docker build -t myapp ."
+alias = "b"
 
 [tasks.up]
 description = "Start docker compose"
 command = "docker compose up -d"
+alias = "u"
 
 [tasks.down]
 description = "Stop docker compose"
 command = "docker compose down"
+alias = "d"
 
 [tasks.logs]
 description = "View docker logs"
 command = "docker compose logs -f"
+alias = "l"

@@ -1,6 +1,6 @@
 # Vai Configuration and Presets
 
-Vai now supports a flexible configuration system with three levels of precedence:
+Vai supports a flexible configuration system with three levels of precedence and task aliases for quick access.
 
 ## Configuration Precedence (highest to lowest)
 
@@ -26,6 +26,25 @@ When the same task is defined in multiple configs, the higher precedence config 
 - Path: `./vai.toml` (in project directory)
 - Purpose: Project-specific tasks that override presets and global config
 - Example: See `examples/local-config.toml`
+
+## Task Aliases
+
+Tasks can have short aliases for quicker access:
+
+```toml
+[tasks.build]
+description = "Build the project"
+command = "zig build"
+alias = "b"
+```
+
+With this configuration, you can run either `vai build` or `vai b` to execute the same task.
+
+### Alias Features
+- Aliases are shown in the help output: `build (b): Build the project.`
+- Aliases work exactly like the full command name
+- Aliases support all the same arguments as the full command
+- Each task can have one alias
 
 ## Preset Activation
 

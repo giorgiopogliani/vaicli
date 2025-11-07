@@ -8,6 +8,7 @@ const Config = @This();
 pub const Task = struct {
     description: []const u8,
     command: []const u8,
+    alias: ?[]const u8 = null,
 
     pub fn run(self: *const Task, allocator: std.mem.Allocator, env: *Env, name: []const u8, args: *std.process.ArgIterator) !void {
         var command = try std.mem.concat(allocator, u8, &[_][]const u8{self.command});
@@ -62,6 +63,7 @@ pub const Task = struct {
 };
 
 tasks: toml.HashMap(Task),
+aliases: std.StringHashMap([]const u8), // Maps alias -> task name
 allocator: std.mem.Allocator,
 
 pub fn deinit(self: *Config) void {
@@ -71,7 +73,13 @@ pub fn deinit(self: *Config) void {
         self.allocator.free(entry.key_ptr.*);
         self.allocator.free(entry.value_ptr.description);
         self.allocator.free(entry.value_ptr.command);
+        if (entry.value_ptr.alias) |alias| {
+            self.allocator.free(alias);
+        }
     }
     // Free the hashmap itself
     self.tasks.map.deinit();
+    
+    // Free aliases map (keys only, values point to task names already freed)
+    self.aliases.deinit();
 }

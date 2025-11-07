@@ -36,8 +36,19 @@ pub const ConfigLoader = struct {
         // 3. Load local config (./vai.toml) - highest precedence
         try self.loadLocalConfig(&merged_tasks);
 
+        // Build alias map
+        var aliases = std.StringHashMap([]const u8).init(self.allocator);
+        var task_it = merged_tasks.iterator();
+        while (task_it.next()) |entry| {
+            if (entry.value_ptr.alias) |alias| {
+                const task_name = entry.key_ptr.*;
+                try aliases.put(alias, task_name);
+            }
+        }
+
         return Config{
             .tasks = toml.HashMap(Config.Task){ .map = merged_tasks },
+            .aliases = aliases,
             .allocator = self.allocator,
         };
     }
@@ -126,10 +137,12 @@ pub const ConfigLoader = struct {
             const task_name = try self.allocator.dupe(u8, entry.key_ptr.*);
             const description = try self.allocator.dupe(u8, entry.value_ptr.description);
             const command = try self.allocator.dupe(u8, entry.value_ptr.command);
+            const alias = if (entry.value_ptr.alias) |a| try self.allocator.dupe(u8, a) else null;
 
             const task = Config.Task{
                 .description = description,
                 .command = command,
+                .alias = alias,
             };
 
             // Put will overwrite existing keys, giving us the precedence we want
