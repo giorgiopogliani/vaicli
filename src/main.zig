@@ -28,6 +28,12 @@ pub fn main() anyerror!void {
         try env.map.put(entry.key_ptr.*, entry.value_ptr.*);
     }
     
+    // Add CWD environment variable with current folder name
+    const cwd_path = try std.process.getCwdAlloc(allocator);
+    defer allocator.free(cwd_path);
+    const cwd_basename = std.fs.path.basename(cwd_path);
+    try env.map.put("CWD", cwd_basename);
+    
     // Override with .env file values
     env.parseFile(".env") catch {};
 
