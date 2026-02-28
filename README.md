@@ -9,7 +9,7 @@ You can add commands like this:
 ```toml
 [tasks.up]
 description = "Start the application"
-command = 'docker compose -p ${PROJECT:-$(pwd)} up -d'
+command = 'docker compose -p ${PROJECT:-$CWD} up -d'
 ```
 
 ## License

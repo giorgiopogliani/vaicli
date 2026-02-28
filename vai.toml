@@ -1,8 +1,13 @@
 [tasks.compose]
 description = "Start docker compose"
-command = 'docker compose -p ${PROJECT:-$(pwd)}'
+command = 'docker compose -p ${PROJECT:-$CWD}'
 
 [tasks.dev]
+description = "Start development server"
+command = 'pnpm run dev'
+alias = "d"
+
+[tasks.longcommand]
 description = "Start development server"
 command = 'pnpm run dev'
 alias = "d"

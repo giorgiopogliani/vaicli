@@ -8,6 +8,13 @@ pub const BLUE = "\x1b[34m";
 pub const CYAN = "\x1b[96m";
 pub const ITALIC = "\x1b[3m";
 pub const BOLD = "\x1b[1m";
+pub const LIGHT_GRAY = "\x1b[37m";
+
+pub fn foreground(color: struct { r: u8, g: u8, b: u8 }, comptime format: []const u8, args: anytype) void {
+    std.debug.print("\x1b[38;2;{d};{d};{d}m", .{ color.r, color.g, color.b });
+    std.debug.print(format, args);
+    std.debug.print(RESET, .{});
+}
 
 pub fn red(comptime format: []const u8, args: anytype) void {
     std.debug.print(RED ++ format ++ RESET, args);
@@ -27,6 +34,10 @@ pub fn blue(comptime format: []const u8, args: anytype) void {
 
 pub fn cyan(comptime format: []const u8, args: anytype) void {
     std.debug.print(CYAN ++ format ++ RESET, args);
+}
+
+pub fn lightGray(comptime format: []const u8, args: anytype) void {
+    std.debug.print(LIGHT_GRAY ++ format ++ RESET, args);
 }
 
 pub fn italic(comptime format: []const u8, args: anytype) void {
