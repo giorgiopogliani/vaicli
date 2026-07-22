@@ -10,76 +10,70 @@ pub const Task = struct {
     command: []const u8,
     alias: ?[]const u8 = null,
 
-    pub fn run(self: *const Task, allocator: std.mem.Allocator, env: *Env, name: []const u8, args: *std.process.ArgIterator) !void {
-        var command = try std.mem.concat(allocator, u8, &[_][]const u8{self.command});
-        defer allocator.free(command);
-
-        while (args.next()) |arg| {
-            const old_command = command;
-            command = try std.mem.concat(allocator, u8, &[_][]const u8{ command, " ", arg });
-            allocator.free(old_command);
+    pub fn expandedCommand(
+        self: *const Task,
+        allocator: std.mem.Allocator,
+        args: []const []const u8,
+    ) ![]u8 {
+        var output: std.Io.Writer.Allocating = .init(allocator);
+        errdefer output.deinit();
+        try output.writer.writeAll(self.command);
+        for (args) |arg| {
+            try output.writer.writeAll(" '");
+            for (arg) |byte| {
+                if (byte == '\'') try output.writer.writeAll("'\\''") else try output.writer.writeByte(byte);
+            }
+            try output.writer.writeByte('\'');
         }
+        return output.toOwnedSlice();
+    }
+
+    pub fn run(
+        self: *const Task,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        env: *const Env,
+        name: []const u8,
+        args: []const []const u8,
+    ) !void {
+        const command = try self.expandedCommand(allocator, args);
+        defer allocator.free(command);
 
         Color.cyan("[{s}] ", .{name});
         Color.italic("{s}\n", .{command});
 
-        // Prepare argv with null-terminated strings
-        const env_path = try allocator.dupeZ(u8, "/usr/bin/env");
-        defer allocator.free(env_path);
-        const bash_arg = try allocator.dupeZ(u8, "bash");
-        defer allocator.free(bash_arg);
-        const dash_c = try allocator.dupeZ(u8, "-c");
-        defer allocator.free(dash_c);
-        const command_z = try allocator.dupeZ(u8, command);
-        defer allocator.free(command_z);
-
-        const argv = [_:null]?[*:0]const u8{ env_path, bash_arg, dash_c, command_z, null };
-
-        // Prepare envp from the environment map
-        var envp_list: std.ArrayListUnmanaged([]const u8) = .{};
-        defer {
-            for (envp_list.items) |item| {
-                allocator.free(item);
-            }
-            envp_list.deinit(allocator);
-        }
-
-        var it = env.map.iterator();
-        while (it.next()) |entry| {
-            const env_str = try std.fmt.allocPrint(allocator, "{s}={s}\x00", .{ entry.key_ptr.*, entry.value_ptr.* });
-            try envp_list.append(allocator, env_str);
-        }
-
-        // Convert to null-terminated array of pointers
-        const envp = try allocator.allocSentinel(?[*:0]const u8, envp_list.items.len, null);
-        defer allocator.free(envp);
-        for (envp_list.items, 0..) |item, i| {
-            envp[i] = @ptrCast(item.ptr);
-        }
-
-        const err = std.posix.execveZ(env_path, &argv, envp);
-        return err;
+        return std.process.replace(io, .{
+            .argv = &.{ "/usr/bin/env", "bash", "-c", command },
+            .environ_map = &env.map,
+        });
     }
 };
 
 tasks: toml.HashMap(Task),
-aliases: std.StringHashMap([]const u8), // Maps alias -> task name
+aliases: std.StringHashMap([]const u8),
 allocator: std.mem.Allocator,
 
+pub fn resolve(self: *const Config, name: []const u8) ?*const Task {
+    if (self.tasks.map.getPtr(name)) |task| return task;
+    if (self.aliases.get(name)) |task_name| return self.tasks.map.getPtr(task_name);
+    return null;
+}
+
 pub fn deinit(self: *Config) void {
-    // Free all task strings
     var it = self.tasks.map.iterator();
     while (it.next()) |entry| {
         self.allocator.free(entry.key_ptr.*);
         self.allocator.free(entry.value_ptr.description);
         self.allocator.free(entry.value_ptr.command);
-        if (entry.value_ptr.alias) |alias| {
-            self.allocator.free(alias);
-        }
+        if (entry.value_ptr.alias) |alias| self.allocator.free(alias);
     }
-    // Free the hashmap itself
     self.tasks.map.deinit();
-
-    // Free aliases map (keys only, values point to task names already freed)
     self.aliases.deinit();
+}
+
+test "task arguments remain single shell arguments" {
+    const task: Task = .{ .description = "test", .command = "echo" };
+    const command = try task.expandedCommand(std.testing.allocator, &.{ "hello world", "a'b" });
+    defer std.testing.allocator.free(command);
+    try std.testing.expectEqualStrings("echo 'hello world' 'a'\\''b'", command);
 }

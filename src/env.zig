@@ -97,14 +97,34 @@ const Tokenizer = struct {
 
         return Token{ .identifier = self.input[start..self.pos] };
     }
+
+    fn nextValue(self: *Self) Token {
+        self.skipWhitespace();
+        if (self.pos >= self.input.len) return .eof;
+        if (self.input[self.pos] == '"' or self.input[self.pos] == '\'') {
+            return self.readQuotedString(self.input[self.pos]);
+        }
+
+        const start = self.pos;
+        while (self.pos < self.input.len and self.input[self.pos] != '\n' and self.input[self.pos] != '#') {
+            self.pos += 1;
+        }
+        const value = std.mem.trimEnd(u8, self.input[start..self.pos], " \t\r");
+        return .{ .identifier = value };
+    }
 };
 
 const Env = @This();
 
 allocator: std.mem.Allocator,
-map: std.process.EnvMap,
-pub fn init(allocator: std.mem.Allocator) Env {
-    return Env{ .allocator = allocator, .map = std.process.EnvMap.init(allocator) };
+io: std.Io,
+map: std.process.Environ.Map,
+pub fn init(allocator: std.mem.Allocator, io: std.Io) Env {
+    return .{
+        .allocator = allocator,
+        .io = io,
+        .map = std.process.Environ.Map.init(allocator),
+    };
 }
 
 pub fn deinit(self: *Env) void {
@@ -147,7 +167,7 @@ pub fn load(self: *Env, content: []const u8) !void {
                 const equals_token = tokenizer.nextToken();
                 if (equals_token != .equals) continue;
 
-                const value_token = tokenizer.nextToken();
+                const value_token = tokenizer.nextValue();
                 const value = switch (value_token) {
                     .string => |str| str,
                     .identifier => |str| str,
@@ -162,17 +182,19 @@ pub fn load(self: *Env, content: []const u8) !void {
 }
 
 pub fn parseFile(self: *Env, path: []const u8) !void {
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-
-    const content = try file.readToEndAlloc(self.allocator, std.math.maxInt(usize));
+    const content = try std.Io.Dir.cwd().readFileAlloc(
+        self.io,
+        path,
+        self.allocator,
+        .limited(16 * 1024 * 1024),
+    );
     defer self.allocator.free(content);
 
     try self.load(content);
 }
 
 test "env parser loads string values correctly" {
-    var env = Env.init(std.testing.allocator);
+    var env = Env.init(std.testing.allocator, std.testing.io);
     defer env.deinit();
 
     try env.load(
@@ -188,7 +210,7 @@ test "env parser loads string values correctly" {
 }
 
 test "env parser parses integer values correctly" {
-    var env = Env.init(std.testing.allocator);
+    var env = Env.init(std.testing.allocator, std.testing.io);
     defer env.deinit();
 
     try env.load(
@@ -201,7 +223,7 @@ test "env parser parses integer values correctly" {
 }
 
 test "env parser parses boolean values correctly" {
-    var env = Env.init(std.testing.allocator);
+    var env = Env.init(std.testing.allocator, std.testing.io);
     defer env.deinit();
 
     try env.load(
@@ -212,7 +234,7 @@ test "env parser parses boolean values correctly" {
 }
 
 test "env parser handles comments correctly" {
-    var env = Env.init(std.testing.allocator);
+    var env = Env.init(std.testing.allocator, std.testing.io);
     defer env.deinit();
 
     try env.load(

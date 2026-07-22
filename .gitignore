@@ -2,3 +2,5 @@ test.toml
 .zig-cache
 .env
 zig-out
+.pi-subagents
+zig-pkg

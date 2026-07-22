@@ -1,52 +1,70 @@
 const std = @import("std");
-const toml = @import("toml");
 const Env = @import("env.zig");
 const App = @import("app.zig");
-const Config = @import("config.zig");
 const ConfigLoader = @import("config_loader.zig").ConfigLoader;
+const Sessions = @import("sessions.zig");
 
 test {
     _ = @import("env.zig");
+    _ = @import("config.zig");
+    _ = @import("paths.zig");
+    _ = @import("protocol.zig");
+    _ = @import("sessions.zig");
 }
 
-pub fn main() anyerror!void {
-    var gpa = std.heap.DebugAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const arena = init.arena.allocator();
+    const raw_args = try init.minimal.args.toSlice(arena);
+    const args = try arena.alloc([]const u8, raw_args.len);
+    for (raw_args, args) |raw, *arg| arg.* = raw;
 
-    // Load config with preset support
-    var loader = ConfigLoader.init(allocator);
+    if (args.len == 2 and
+        (std.mem.eql(u8, args[1], "--daemon") or std.mem.eql(u8, args[1], "-d")))
+    {
+        return Sessions.runDaemon(init.gpa, arena, init.io, init.environ_map);
+    }
+    // Keep the existing config and dotenv order: config comes from the process
+    // environment, then the command environment is overlaid by .env.
+    var loader = ConfigLoader.init(init.gpa, init.io, init.environ_map);
     defer loader.deinit();
     var config = try loader.load();
     defer config.deinit();
 
-    // Loading Dotenv file if it exists
-    var env = Env.init(allocator);
+    var env = Env.init(init.gpa, init.io);
     defer env.deinit();
-
-    // Inherit parent process environment
-    var parent_env = try std.process.getEnvMap(allocator);
-    defer parent_env.deinit();
-    var parent_it = parent_env.iterator();
-    while (parent_it.next()) |entry| {
-        try env.map.put(entry.key_ptr.*, entry.value_ptr.*);
+    for (init.environ_map.keys(), init.environ_map.values()) |key, value| {
+        try env.map.put(key, value);
     }
 
-    // Add CWD environment variable with current folder name
-    const cwd_path = try std.process.getCwdAlloc(allocator);
-    defer allocator.free(cwd_path);
-    const cwd_basename = std.fs.path.basename(cwd_path);
-    try env.map.put("CWD", cwd_basename);
+    const cwd_path = try std.process.currentPathAlloc(init.io, init.gpa);
+    defer init.gpa.free(cwd_path);
+    try env.map.put("CWD", std.fs.path.basename(cwd_path));
 
-    // Override with .env file values
+    // Preserve the project .env loader and its override semantics.
     env.parseFile(".env") catch {};
 
-    // Parse command line arguments
-    var args = try std.process.argsWithAllocator(allocator);
-    defer args.deinit();
-    _ = args.skip();
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_file_writer: std.Io.File.Writer = .init(.stdout(), init.io, &stdout_buffer);
+    const stdout = &stdout_file_writer.interface;
 
-    // Init app
-    const app = App.init(allocator, &env, &config);
-    try app.run(&args);
+    const command_args = args[1..];
+    if (Sessions.Cli.handles(command_args)) {
+        const exe_path = try std.process.executablePathAlloc(init.io, init.gpa);
+        defer init.gpa.free(exe_path);
+        var cli: Sessions.Cli = .{
+            .allocator = init.gpa,
+            .io = init.io,
+            .environ = init.environ_map,
+            .config = &config,
+            .env = &env,
+            .exe_path = exe_path,
+            .stdout = stdout,
+        };
+        try cli.run(command_args);
+        return stdout.flush();
+    }
+
+    const app = App.init(init.gpa, init.io, &env, &config);
+    try app.run(command_args);
+    try stdout.flush();
 }

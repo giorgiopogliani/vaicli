@@ -5,81 +5,59 @@ const Color = @import("colors.zig");
 const App = @This();
 
 allocator: std.mem.Allocator,
+io: std.Io,
 env: *Env,
 config: *const Config,
 
-pub fn init(allocator: std.mem.Allocator, env: *Env, config: *const Config) App {
-    return App{
-        .allocator = allocator,
-        .env = env,
-        .config = config,
-    };
+pub fn init(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    env: *Env,
+    config: *const Config,
+) App {
+    return .{ .allocator = allocator, .io = io, .env = env, .config = config };
 }
 
-pub fn run(self: *const App, args: *std.process.ArgIterator) !void {
-    const command = args.next();
-
-    if (command) |cmd| {
-        // First check if it's a task name
-        if (self.config.tasks.map.get(cmd)) |task| {
-            try task.run(self.allocator, self.env, cmd, args);
-            return;
-        }
-
-        // If not, check if it's an alias
-        if (self.config.aliases.get(cmd)) |task_name| {
-            if (self.config.tasks.map.get(task_name)) |task| {
-                try task.run(self.allocator, self.env, task_name, args);
-                return;
-            }
-        }
-
-        // Command not found
-        self.help();
-    } else {
-        self.help();
-    }
+pub fn run(self: *const App, args: []const []const u8) !void {
+    if (args.len == 0) return self.help();
+    const task = self.config.resolve(args[0]) orelse return self.help();
+    try task.run(self.allocator, self.io, self.env, args[0], args[1..]);
 }
 
 pub fn help(self: *const App) void {
-    Color.normal("Usage: [command] [arguments]\n", .{});
-    const maxLen: usize = self.getMaxLen();
-    var iter = self.config.tasks.map.iterator();
+    Color.normal("Usage: vai [--bg [--persistent]] <command> [arguments]\n", .{});
+    Color.normal("       vai -l|--list [jobs|sessions]\n", .{});
+    Color.normal("       vai -o|--output <job> | stop <job>\n", .{});
+    Color.normal("       vai --rm <j|s-prefixed-id>\n", .{});
+    Color.normal("       vai --mode <session>\n", .{});
+    Color.normal("       vai -d|--daemon\n\n", .{});
 
+    const max_len = self.getMaxLen();
+    var iter = self.config.tasks.map.iterator();
     while (iter.next()) |entry| {
         const command = entry.key_ptr.*;
-
-        if (entry.value_ptr.*.alias) |alias| {
+        if (entry.value_ptr.alias) |alias| {
             Color.normal("({s})", .{alias});
         } else {
-            printMany(" ", "   ".len);
+            printMany(" ", 3);
         }
         Color.bold(" {s} ", .{command});
-
-        const alignSpaces = maxLen - command.len;
-        printMany(".", alignSpaces + 3);
-        Color.normal(" {s}.\n", .{entry.value_ptr.*.description});
+        printMany(".", max_len - command.len + 3);
+        Color.normal(" {s}.\n", .{entry.value_ptr.description});
     }
 }
 
 fn printMany(char: []const u8, len: usize) void {
-    var i: u8 = 0;
-    while (i < len) {
+    for (0..len) |_| {
         Color.foreground(.{ .r = 110, .g = 110, .b = 110 }, "{s}", .{char});
-        i += 1;
     }
 }
 
 fn getMaxLen(self: *const App) usize {
-    var maxLen: usize = 0;
+    var max_len: usize = 0;
     var iter = self.config.tasks.map.iterator();
     while (iter.next()) |entry| {
-        const name = entry.key_ptr.*;
-        var aliasLen: usize = 0;
-        if (entry.value_ptr.*.alias) |alias| {
-            aliasLen = alias.len;
-        }
-        maxLen = @max(maxLen, name.len + aliasLen);
+        max_len = @max(max_len, entry.key_ptr.*.len + if (entry.value_ptr.alias) |a| a.len else 0);
     }
-    return maxLen;
+    return max_len;
 }
