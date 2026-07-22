@@ -79,7 +79,7 @@ pub fn deinit(self: *Config) void {
     }
     // Free the hashmap itself
     self.tasks.map.deinit();
-    
+
     // Free aliases map (keys only, values point to task names already freed)
     self.aliases.deinit();
 }

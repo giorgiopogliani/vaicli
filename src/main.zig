@@ -5,6 +5,10 @@ const App = @import("app.zig");
 const Config = @import("config.zig");
 const ConfigLoader = @import("config_loader.zig").ConfigLoader;
 
+test {
+    _ = @import("env.zig");
+}
+
 pub fn main() anyerror!void {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -19,7 +23,7 @@ pub fn main() anyerror!void {
     // Loading Dotenv file if it exists
     var env = Env.init(allocator);
     defer env.deinit();
-    
+
     // Inherit parent process environment
     var parent_env = try std.process.getEnvMap(allocator);
     defer parent_env.deinit();
@@ -27,13 +31,13 @@ pub fn main() anyerror!void {
     while (parent_it.next()) |entry| {
         try env.map.put(entry.key_ptr.*, entry.value_ptr.*);
     }
-    
+
     // Add CWD environment variable with current folder name
     const cwd_path = try std.process.getCwdAlloc(allocator);
     defer allocator.free(cwd_path);
     const cwd_basename = std.fs.path.basename(cwd_path);
     try env.map.put("CWD", cwd_basename);
-    
+
     // Override with .env file values
     env.parseFile(".env") catch {};
 

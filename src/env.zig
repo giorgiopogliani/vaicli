@@ -216,11 +216,17 @@ test "env parser handles comments correctly" {
     defer env.deinit();
 
     try env.load(
-        \\KEY1=VALUE1
+        \\KEY1="VALUE1"
         \\#this is a comment
         \\KEY2=VALUE2#inline comment
+        \\KEY3=VALUE3
+        \\KEY4=VA "LU" E3
+        \\KEY5='VALUE5'
     );
 
     try std.testing.expect(std.mem.eql(u8, env.string("KEY1"), "VALUE1"));
     try std.testing.expect(std.mem.eql(u8, env.string("KEY2"), "VALUE2"));
+    try std.testing.expect(std.mem.eql(u8, env.string("KEY3"), "VALUE3"));
+    try std.testing.expect(std.mem.eql(u8, env.string("KEY4"), "VA \"LU\" E3"));
+    try std.testing.expect(std.mem.eql(u8, env.string("KEY5"), "VALUE5"));
 }
