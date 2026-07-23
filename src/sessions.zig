@@ -1400,9 +1400,9 @@ fn sessionSnapshot(registry: *Registry, allocator: std.mem.Allocator, payload: [
     var output = protocol.PayloadWriter.init(allocator);
     defer output.deinit();
     var count: u64 = 0;
-    for (registry.jobs.items) |job| if (job.active) {
-        count += 1;
-    };
+    for (registry.jobs.items) |job| {
+        if (job.active and registry.findSession(job.session_id) != null) count += 1;
+    }
     try output.integer(count);
     for (registry.jobs.items) |job| {
         if (!job.active) continue;
