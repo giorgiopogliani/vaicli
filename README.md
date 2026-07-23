@@ -32,13 +32,14 @@ The CLI returns after the daemon starts the job. Each job runs in its own proces
 
 Normal `-b` jobs retain the existing non-interactive behavior. Adding `-t` creates a pseudo-terminal: the child starts a POSIX session with the PTY slave as its controlling terminal, and stdin/stdout/stderr use that slave. A daemon thread continuously drains the PTY master into the job log, so PTY output remains available through `-o` and `-o -f`.
 
-List jobs (the default list target) or sessions:
+Open the inline TUI for jobs across all active sessions (no alternate/fullscreen buffer):
 
 ```sh
 vai -l
-vai --list jobs
-vai --list sessions
+# or: vai --list
 ```
+
+The left pane lists each job and its session, and supports arrow keys or `j`/`k` for selection. The right pane previews the selected job's output with stored ANSI colors; `Page Up` and `Page Down` scroll its logs. Press `a` to attach to a selected PTY job, `d` to delete, `r` to restart with the original command/environment/PTY mode, `t` to toggle the selected job's session mode, or `q` to quit. Detaching with `Ctrl-]` returns to the TUI.
 
 Inspect or follow output:
 

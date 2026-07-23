@@ -42,7 +42,12 @@ pub const Cli = struct {
             return self.start(args);
         }
         if (std.mem.eql(u8, args[0], "--list") or std.mem.eql(u8, args[0], "-l")) {
-            return self.list(args[1..]);
+            while (try self.tui(args[1..])) |job_id| {
+                var id_buffer: [32]u8 = undefined;
+                const id = try std.fmt.bufPrint(&id_buffer, "j{d}", .{job_id});
+                try self.attach(&.{id});
+            }
+            return;
         }
         if (std.mem.eql(u8, args[0], "--rm")) return self.remove(args[1..]);
         if (std.mem.eql(u8, args[0], "--output") or std.mem.eql(u8, args[0], "-o")) {
@@ -55,17 +60,380 @@ pub const Cli = struct {
         return error.InvalidArguments;
     }
 
-    fn list(self: *Cli, args: []const []const u8) !void {
-        if (args.len > 1) return error.InvalidArguments;
-        const kind: protocol.Kind = if (args.len == 0 or std.mem.eql(u8, args[0], "jobs"))
-            .list_jobs
-        else if (std.mem.eql(u8, args[0], "sessions"))
-            .list_sessions
-        else
-            return error.InvalidArguments;
-        const response = try self.request(kind, "");
+    const TuiJob = struct {
+        id: u64,
+        session_id: u64,
+        persistent: bool,
+        uses_pty: bool,
+        status: []u8,
+        command: []u8,
+        log_path: []u8,
+
+        fn deinit(job: *TuiJob, allocator: std.mem.Allocator) void {
+            allocator.free(job.status);
+            allocator.free(job.command);
+            allocator.free(job.log_path);
+        }
+    };
+
+    const TuiSnapshot = struct {
+        jobs: std.ArrayList(TuiJob),
+
+        fn deinit(snapshot: *TuiSnapshot, allocator: std.mem.Allocator) void {
+            for (snapshot.jobs.items) |*job| job.deinit(allocator);
+            snapshot.jobs.deinit(allocator);
+        }
+    };
+
+    const Preview = struct {
+        data: []u8,
+        lines: std.ArrayList([]const u8),
+
+        fn deinit(preview: *Preview, allocator: std.mem.Allocator) void {
+            allocator.free(preview.data);
+            preview.lines.deinit(allocator);
+        }
+    };
+
+    fn tui(self: *Cli, args: []const []const u8) !?u64 {
+        if (args.len != 0) return error.InvalidArguments;
+        const tty = try controllingTty(self.allocator);
+        defer self.allocator.free(tty);
+
+        const original = try std.posix.tcgetattr(std.posix.STDIN_FILENO);
+        var raw = original;
+        cfmakeraw(&raw);
+        try std.posix.tcsetattr(std.posix.STDIN_FILENO, .NOW, raw);
+        defer std.posix.tcsetattr(std.posix.STDIN_FILENO, .NOW, original) catch {};
+
+        var rendered_lines: usize = 0;
+        defer {
+            if (rendered_lines > 0) {
+                self.stdout.print("\x1b[{d}A\r\x1b[J", .{rendered_lines}) catch {};
+            }
+            self.stdout.writeAll("\x1b[?25h") catch {};
+            self.stdout.flush() catch {};
+        }
+        try self.stdout.writeAll("\x1b[?25l");
+
+        var selected: usize = 0;
+        var preview_scroll: usize = 0;
+        var message: ?[]u8 = null;
+        defer if (message) |text| self.allocator.free(text);
+
+        while (true) {
+            var snapshot = try self.fetchTuiSnapshot();
+            defer snapshot.deinit(self.allocator);
+            if (snapshot.jobs.items.len == 0) {
+                selected = 0;
+            } else if (selected >= snapshot.jobs.items.len) {
+                selected = snapshot.jobs.items.len - 1;
+            }
+
+            rendered_lines = try self.renderTui(&snapshot, selected, preview_scroll, message, rendered_lines);
+            try self.stdout.flush();
+
+            var fds = [_]std.posix.pollfd{.{
+                .fd = std.posix.STDIN_FILENO,
+                .events = std.posix.POLL.IN | std.posix.POLL.HUP,
+                .revents = 0,
+            }};
+            _ = try std.posix.poll(&fds, 200);
+            if (fds[0].revents & std.posix.POLL.IN == 0) continue;
+
+            var input: [16]u8 = undefined;
+            const amount = std.Io.File.stdin().readStreaming(self.io, &.{&input}) catch |err| switch (err) {
+                error.EndOfStream => return null,
+                else => return err,
+            };
+            if (amount == 0) continue;
+            const key = input[0];
+            if (key == 'q' or key == 3) return null;
+            if (key == 'k' or isArrow(input[0..amount], 'A')) {
+                selected -|= 1;
+                preview_scroll = 0;
+                continue;
+            }
+            if (key == 'j' or isArrow(input[0..amount], 'B')) {
+                if (selected + 1 < snapshot.jobs.items.len) selected += 1;
+                preview_scroll = 0;
+                continue;
+            }
+            if (isPageKey(input[0..amount], '5')) {
+                preview_scroll +|= 8;
+                continue;
+            }
+            if (isPageKey(input[0..amount], '6')) {
+                preview_scroll -|= 8;
+                continue;
+            }
+
+            if (key == 'a') {
+                if (snapshot.jobs.items.len == 0) continue;
+                const job = snapshot.jobs.items[selected];
+                if (job.uses_pty and std.mem.eql(u8, job.status, "running")) return job.id;
+                if (message) |text| self.allocator.free(text);
+                message = try self.allocator.dupe(
+                    u8,
+                    if (job.uses_pty) "selected job is not running" else "selected job has no PTY",
+                );
+                continue;
+            }
+
+            const action_kind: ?protocol.Kind = switch (key) {
+                'd' => .remove_job,
+                'r' => .restart_job,
+                else => null,
+            };
+            if (action_kind) |kind| {
+                if (snapshot.jobs.items.len == 0) continue;
+                const id = try std.fmt.allocPrint(self.allocator, "j{d}", .{snapshot.jobs.items[selected].id});
+                defer self.allocator.free(id);
+                const response = try self.idRequest(kind, id, null);
+                defer response.deinit(self.allocator);
+                if (message) |text| self.allocator.free(text);
+                message = try self.allocator.dupe(u8, std.mem.trimEnd(u8, response.payload, "\r\n"));
+                continue;
+            }
+            if (key == 't') {
+                if (snapshot.jobs.items.len == 0) continue;
+                const id = try std.fmt.allocPrint(self.allocator, "s{d}", .{snapshot.jobs.items[selected].session_id});
+                defer self.allocator.free(id);
+                const response = try self.idRequest(.toggle_session_mode, id, tty);
+                defer response.deinit(self.allocator);
+                if (message) |text| self.allocator.free(text);
+                message = try self.allocator.dupe(u8, std.mem.trimEnd(u8, response.payload, "\r\n"));
+            }
+        }
+    }
+
+    fn fetchTuiSnapshot(self: *Cli) !TuiSnapshot {
+        const response = try self.request(.session_snapshot, "");
         defer response.deinit(self.allocator);
-        return self.printResponse(response);
+        if (response.kind == .response_error) {
+            try self.printResponse(response);
+            return error.DaemonRequestFailed;
+        }
+
+        var reader = protocol.PayloadReader.init(response.payload);
+        var snapshot: TuiSnapshot = .{ .jobs = .empty };
+        errdefer snapshot.deinit(self.allocator);
+        const count = try reader.integer();
+        if (count > max_items) return error.InvalidJobCount;
+        for (0..@intCast(count)) |_| {
+            try snapshot.jobs.append(self.allocator, .{
+                .id = try reader.integer(),
+                .session_id = try reader.integer(),
+                .persistent = try reader.boolean(),
+                .uses_pty = try reader.boolean(),
+                .status = try self.allocator.dupe(u8, try reader.string()),
+                .command = try self.allocator.dupe(u8, try reader.string()),
+                .log_path = try self.allocator.dupe(u8, try reader.string()),
+            });
+        }
+        if (!reader.done()) return error.TrailingPayload;
+        return snapshot;
+    }
+
+    fn renderTui(
+        self: *Cli,
+        snapshot: *const TuiSnapshot,
+        selected: usize,
+        preview_scroll: usize,
+        message: ?[]const u8,
+        previous_lines: usize,
+    ) !usize {
+        const terminal = currentTerminalSize(self.io);
+        const width: usize = if (terminal.col > 4) terminal.col - 1 else 79;
+        const desired_left = @min(50, @max(18, (width * 2) / 5));
+        const left_width: usize = @min(desired_left, width -| 4);
+        const right_width: usize = width -| (left_width + 3);
+        const available_rows: usize = if (terminal.row > 3) terminal.row - 3 else 1;
+        const body_rows: usize = @min(8, available_rows);
+        const total_lines: usize = body_rows + 3;
+
+        if (previous_lines > 0) try self.stdout.print("\x1b[{d}A", .{previous_lines});
+        try self.stdout.writeAll("\r\x1b[J");
+
+        var preview: Preview = if (snapshot.jobs.items.len > 0)
+            try self.loadPreview(snapshot.jobs.items[selected].log_path)
+        else
+            .{ .data = try self.allocator.alloc(u8, 0), .lines = .empty };
+        defer preview.deinit(self.allocator);
+        const maximum_scroll = preview.lines.items.len -| body_rows;
+        const effective_scroll = @min(preview_scroll, maximum_scroll);
+        const preview_start = maximum_scroll - effective_scroll;
+        const preview_row_offset = if (preview.lines.items.len < body_rows)
+            body_rows - preview.lines.items.len
+        else
+            0;
+
+        const left_title = "Vai jobs";
+        var right_header: [64]u8 = undefined;
+        const right_title = if (snapshot.jobs.items.len > 0)
+            try std.fmt.bufPrint(&right_header, "Output j{d}", .{snapshot.jobs.items[selected].id})
+        else
+            "Output";
+        try self.renderPaneLine(left_title, right_title, left_width, right_width, false);
+        try self.renderPaneLine("Jobs", "", left_width, right_width, false);
+
+        const window_start = if (selected >= body_rows) selected - body_rows + 1 else 0;
+        for (0..body_rows) |row| {
+            const job_index = window_start + row;
+            var left_buffer: [256]u8 = undefined;
+            const left = if (job_index < snapshot.jobs.items.len) blk: {
+                const job = snapshot.jobs.items[job_index];
+                break :blk try std.fmt.bufPrint(&left_buffer, "{s} j{d}/s{d} {s} {s} {s} {s}", .{
+                    if (job_index == selected) ">" else " ",
+                    job.id,
+                    job.session_id,
+                    if (job.persistent) "persist" else "ephem",
+                    if (job.uses_pty) "pty" else "plain",
+                    job.status,
+                    job.command,
+                });
+            } else "";
+            const preview_index = preview_start + (row -| preview_row_offset);
+            const right = if (row >= preview_row_offset and preview_index < preview.lines.items.len)
+                preview.lines.items[preview_index]
+            else
+                "";
+            try self.renderPaneLine(
+                left,
+                right,
+                left_width,
+                right_width,
+                job_index < snapshot.jobs.items.len and job_index == selected,
+            );
+        }
+
+        const footer = message orelse "↑↓ select  a attach  d del  r restart  t mode  PgUp/PgDn logs  q quit";
+        try self.stdout.writeAll("\r\x1b[2K");
+        _ = try self.writeLimited(footer, width);
+        try self.stdout.writeAll("\r\n");
+        return total_lines;
+    }
+
+    fn renderPaneLine(
+        self: *Cli,
+        left: []const u8,
+        right: []const u8,
+        left_width: usize,
+        right_width: usize,
+        selected: bool,
+    ) !void {
+        try self.stdout.writeAll("\r\x1b[2K");
+        if (selected) try self.stdout.writeAll("\x1b[36m");
+        const left_len = try self.writeLimited(left, left_width);
+        if (selected) try self.stdout.writeAll("\x1b[0m");
+        try self.stdout.splatByteAll(' ', left_width - left_len);
+        try self.stdout.writeAll(" │ ");
+        _ = try self.writeAnsiLimited(right, right_width);
+        try self.stdout.writeAll("\x1b[0m\r\n");
+    }
+
+    fn writeLimited(self: *Cli, text: []const u8, limit: usize) !usize {
+        const length = @min(text.len, limit);
+        try self.stdout.writeAll(text[0..length]);
+        return length;
+    }
+
+    fn writeAnsiLimited(self: *Cli, text: []const u8, limit: usize) !usize {
+        var index: usize = 0;
+        var visible: usize = 0;
+        while (index < text.len and visible < limit) {
+            if (text[index] == 0x1b and index + 1 < text.len and text[index + 1] == '[') {
+                const escape_start = index;
+                index += 2;
+                while (index < text.len) : (index += 1) {
+                    if (text[index] >= 0x40 and text[index] <= 0x7e) {
+                        index += 1;
+                        if (text[index - 1] == 'm') try self.stdout.writeAll(text[escape_start..index]);
+                        break;
+                    }
+                }
+                continue;
+            }
+            const sequence_length = std.unicode.utf8ByteSequenceLength(text[index]) catch 1;
+            const amount: usize = @min(sequence_length, text.len - index);
+            try self.stdout.writeAll(text[index .. index + amount]);
+            index += amount;
+            visible += 1;
+        }
+        return visible;
+    }
+
+    fn loadPreview(self: *Cli, path: []const u8) !Preview {
+        const file = std.Io.Dir.cwd().openFile(self.io, path, .{}) catch |err| switch (err) {
+            error.FileNotFound => return .{ .data = try self.allocator.alloc(u8, 0), .lines = .empty },
+            else => return err,
+        };
+        defer file.close(self.io);
+        const length = try file.length(self.io);
+        const amount: usize = @intCast(@min(length, 16 * 1024));
+        const raw = try self.allocator.alloc(u8, amount);
+        defer self.allocator.free(raw);
+        _ = try file.readPositionalAll(self.io, raw, length - amount);
+
+        var sanitized: std.ArrayList(u8) = .empty;
+        errdefer sanitized.deinit(self.allocator);
+        var index: usize = 0;
+        while (index < raw.len) {
+            const byte = raw[index];
+            if (byte == 0x1b and index + 1 < raw.len) {
+                if (raw[index + 1] == '[') {
+                    const escape_start = index;
+                    index += 2;
+                    while (index < raw.len) : (index += 1) {
+                        if (raw[index] >= 0x40 and raw[index] <= 0x7e) {
+                            index += 1;
+                            if (raw[index - 1] == 'm') {
+                                try sanitized.appendSlice(self.allocator, raw[escape_start..index]);
+                            }
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                if (raw[index + 1] == ']') {
+                    index += 2;
+                    while (index < raw.len) : (index += 1) {
+                        if (raw[index] == 0x07) {
+                            index += 1;
+                            break;
+                        }
+                        if (raw[index] == 0x1b and index + 1 < raw.len and raw[index + 1] == '\\') {
+                            index += 2;
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                index += 2;
+                continue;
+            }
+            index += 1;
+            if (byte == '\r') continue;
+            if (byte == '\n' or byte >= 0x20) {
+                try sanitized.append(self.allocator, byte);
+            } else if (byte == '\t') {
+                try sanitized.append(self.allocator, ' ');
+            }
+        }
+        const data = try sanitized.toOwnedSlice(self.allocator);
+        var lines: std.ArrayList([]const u8) = .empty;
+        errdefer lines.deinit(self.allocator);
+        var iterator = std.mem.splitScalar(u8, data, '\n');
+        while (iterator.next()) |line| try lines.append(self.allocator, line);
+        return .{ .data = data, .lines = lines };
+    }
+
+    fn isArrow(input: []const u8, direction: u8) bool {
+        return input.len >= 3 and input[0] == 0x1b and input[1] == '[' and input[2] == direction;
+    }
+
+    fn isPageKey(input: []const u8, key: u8) bool {
+        return input.len >= 4 and input[0] == 0x1b and input[1] == '[' and input[2] == key and input[3] == '~';
     }
 
     fn remove(self: *Cli, args: []const []const u8) !void {
@@ -498,6 +866,9 @@ const Job = struct {
     pid: std.posix.pid_t,
     pgid: std.posix.pid_t,
     command: []const u8,
+    argv: []const []const u8,
+    cwd: []const u8,
+    environ: std.process.Environ.Map,
     log_path: []const u8,
     uses_pty: bool,
     pty_master: ?std.Io.File = null,
@@ -783,8 +1154,78 @@ fn handleRequest(registry: *Registry, allocator: std.mem.Allocator, frame: proto
         .attach_info => attachInfo(registry, allocator, frame.payload),
         .pty_input => ptyInput(registry, frame.payload),
         .pty_resize => ptyResize(registry, frame.payload),
+        .restart_job => restartJob(registry, allocator, frame.payload),
+        .session_snapshot => sessionSnapshot(registry, allocator, frame.payload),
         else => error.InvalidRequest,
     };
+}
+
+fn spawnJobProcess(registry: *Registry, job: *Job, tty: []const u8) !void {
+    const log_file = try std.Io.Dir.cwd().createFile(registry.io, job.log_path, .{ .permissions = .fromMode(0o600) });
+    var log_transferred = false;
+    defer if (!log_transferred) log_file.close(registry.io);
+
+    var pty_master: ?std.Io.File = null;
+    var pty_slave: ?std.Io.File = null;
+    errdefer if (pty_master) |master| master.close(registry.io);
+    errdefer if (pty_slave) |slave| slave.close(registry.io);
+
+    const child = if (job.uses_pty) blk: {
+        const pty = try createPty(registry.io, tty);
+        pty_master = pty.master;
+        pty_slave = pty.slave;
+        const bootstrap_argv = try registry.gpa.alloc([]const u8, job.argv.len + 2);
+        defer registry.gpa.free(bootstrap_argv);
+        bootstrap_argv[0] = registry.exe_path;
+        bootstrap_argv[1] = "--pty-child";
+        @memcpy(bootstrap_argv[2..], job.argv);
+        const spawned = try std.process.spawn(registry.io, .{
+            .argv = bootstrap_argv,
+            .cwd = .{ .path = job.cwd },
+            .environ_map = &job.environ,
+            .stdin = .{ .file = pty.slave },
+            .stdout = .{ .file = pty.slave },
+            .stderr = .{ .file = pty.slave },
+        });
+        pty.slave.close(registry.io);
+        pty_slave = null;
+        break :blk spawned;
+    } else try std.process.spawn(registry.io, .{
+        .argv = job.argv,
+        .cwd = .{ .path = job.cwd },
+        .environ_map = &job.environ,
+        .stdin = .ignore,
+        .stdout = .{ .file = log_file },
+        .stderr = .{ .file = log_file },
+        .pgid = 0,
+    });
+
+    const pid = child.id.?;
+    job.pid = pid;
+    job.pgid = pid;
+    job.status = .running;
+    job.exit_code = null;
+    job.signal = null;
+    job.pty_master = pty_master;
+
+    if (pty_master) |master| {
+        const drain_context = try registry.allocator.create(PtyDrainContext);
+        drain_context.* = .{
+            .registry = registry,
+            .job = job,
+            .master = master,
+            .log = log_file,
+        };
+        const drain_thread = try std.Thread.spawn(.{}, drainPty, .{drain_context});
+        drain_thread.detach();
+        log_transferred = true;
+        pty_master = null;
+    }
+
+    const context = try registry.allocator.create(ReapContext);
+    context.* = .{ .registry = registry, .job = job, .child = child };
+    const thread = try std.Thread.spawn(.{}, reapJob, .{context});
+    thread.detach();
 }
 
 fn handleStart(registry: *Registry, allocator: std.mem.Allocator, payload: []u8) !Response {
@@ -829,77 +1270,27 @@ fn handleStart(registry: *Registry, allocator: std.mem.Allocator, payload: []u8)
 
     const job_id = registry.next_job_id;
     registry.next_job_id += 1;
-    const log_path = try std.fmt.allocPrint(registry.allocator, "{s}/job-{d}.log", .{ registry.paths.logs_dir, job_id });
-    const log_file = try std.Io.Dir.cwd().createFile(registry.io, log_path, .{ .permissions = .fromMode(0o600) });
-    var log_transferred = false;
-    defer if (!log_transferred) log_file.close(registry.io);
+    const stored_argv = try registry.allocator.alloc([]const u8, argv.len);
+    for (argv, stored_argv) |arg, *stored| stored.* = try registry.allocator.dupe(u8, arg);
+    var stored_env = std.process.Environ.Map.init(registry.allocator);
+    for (env.keys(), env.values()) |key, value| try stored_env.put(key, value);
 
-    var pty_master: ?std.Io.File = null;
-    var pty_slave: ?std.Io.File = null;
-    errdefer if (pty_master) |master| master.close(registry.io);
-    errdefer if (pty_slave) |slave| slave.close(registry.io);
-
-    const child = if (use_pty) blk: {
-        const pty = try createPty(registry.io, tty);
-        pty_master = pty.master;
-        pty_slave = pty.slave;
-        const bootstrap_argv = try allocator.alloc([]const u8, argv.len + 2);
-        bootstrap_argv[0] = registry.exe_path;
-        bootstrap_argv[1] = "--pty-child";
-        @memcpy(bootstrap_argv[2..], argv);
-        const spawned = try std.process.spawn(registry.io, .{
-            .argv = bootstrap_argv,
-            .cwd = .{ .path = cwd },
-            .environ_map = &env,
-            .stdin = .{ .file = pty.slave },
-            .stdout = .{ .file = pty.slave },
-            .stderr = .{ .file = pty.slave },
-        });
-        pty.slave.close(registry.io);
-        pty_slave = null;
-        break :blk spawned;
-    } else try std.process.spawn(registry.io, .{
-        .argv = argv,
-        .cwd = .{ .path = cwd },
-        .environ_map = &env,
-        .stdin = .ignore,
-        .stdout = .{ .file = log_file },
-        .stderr = .{ .file = log_file },
-        .pgid = 0,
-    });
-    const pid = child.id.?;
     const job = try registry.allocator.create(Job);
     job.* = .{
         .id = job_id,
         .session_id = session.id,
-        .pid = pid,
-        .pgid = pid,
+        .pid = 0,
+        .pgid = 0,
         .command = try registry.allocator.dupe(u8, argv[0]),
-        .log_path = log_path,
+        .argv = stored_argv,
+        .cwd = try registry.allocator.dupe(u8, cwd),
+        .environ = stored_env,
+        .log_path = try std.fmt.allocPrint(registry.allocator, "{s}/job-{d}.log", .{ registry.paths.logs_dir, job_id }),
         .uses_pty = use_pty,
-        .pty_master = pty_master,
     };
     try registry.jobs.append(registry.allocator, job);
     try session.jobs.append(registry.allocator, job);
-
-    if (pty_master) |master| {
-        const drain_context = try registry.allocator.create(PtyDrainContext);
-        drain_context.* = .{
-            .registry = registry,
-            .job = job,
-            .master = master,
-            .log = log_file,
-        };
-        const drain_thread = try std.Thread.spawn(.{}, drainPty, .{drain_context});
-        drain_thread.detach();
-        log_transferred = true;
-        pty_master = null;
-    }
-
-    const context = try registry.allocator.create(ReapContext);
-    context.* = .{ .registry = registry, .job = job, .child = child };
-    const thread = try std.Thread.spawn(.{}, reapJob, .{context});
-    thread.detach();
+    try spawnJobProcess(registry, job, tty);
 
     return .{ .payload = try std.fmt.allocPrint(
         allocator,
@@ -950,6 +1341,81 @@ fn listSessions(registry: *Registry, allocator: std.mem.Allocator) !Response {
         });
     }
     return .{ .payload = try output.toOwnedSlice() };
+}
+
+fn restartJob(registry: *Registry, allocator: std.mem.Allocator, payload: []u8) !Response {
+    var reader = protocol.PayloadReader.init(payload);
+    const id = try parseId(try reader.string(), 'j');
+    if (!reader.done()) return error.TrailingPayload;
+
+    registry.mutex.lock();
+    const job = registry.findJob(id) orelse {
+        registry.mutex.unlock();
+        return error.JobNotFound;
+    };
+    const session = registry.findSession(job.session_id) orelse {
+        registry.mutex.unlock();
+        return error.SessionNotFound;
+    };
+    const tty = session.tty;
+    const old_pgid = job.pgid;
+    if (job.status == .running or job.status == .stopping) {
+        job.status = .stopping;
+        std.posix.kill(-old_pgid, .TERM) catch {};
+    }
+    registry.mutex.unlock();
+
+    var stopped = false;
+    for (0..100) |_| {
+        registry.mutex.lock();
+        stopped = job.status != .running and job.status != .stopping and job.pty_master == null;
+        registry.mutex.unlock();
+        if (stopped) break;
+        try std.Io.sleep(registry.io, .fromMilliseconds(10), .awake);
+    }
+    if (!stopped) {
+        std.posix.kill(-old_pgid, .KILL) catch {};
+        for (0..100) |_| {
+            registry.mutex.lock();
+            stopped = job.status != .running and job.status != .stopping and job.pty_master == null;
+            registry.mutex.unlock();
+            if (stopped) break;
+            try std.Io.sleep(registry.io, .fromMilliseconds(10), .awake);
+        }
+    }
+    if (!stopped) return error.RestartTimeout;
+
+    registry.mutex.lock();
+    defer registry.mutex.unlock();
+    if (!job.active or !session.active) return error.JobNotFound;
+    try spawnJobProcess(registry, job, tty);
+    return .{ .payload = try std.fmt.allocPrint(allocator, "restarted job j{d}\n", .{id}) };
+}
+
+fn sessionSnapshot(registry: *Registry, allocator: std.mem.Allocator, payload: []u8) !Response {
+    if (payload.len != 0) return error.TrailingPayload;
+
+    registry.mutex.lock();
+    defer registry.mutex.unlock();
+    var output = protocol.PayloadWriter.init(allocator);
+    defer output.deinit();
+    var count: u64 = 0;
+    for (registry.jobs.items) |job| if (job.active) {
+        count += 1;
+    };
+    try output.integer(count);
+    for (registry.jobs.items) |job| {
+        if (!job.active) continue;
+        const session = registry.findSession(job.session_id) orelse continue;
+        try output.integer(job.id);
+        try output.integer(session.id);
+        try output.boolean(session.policy == .persistent);
+        try output.boolean(job.uses_pty);
+        try output.string(@tagName(job.status));
+        try output.string(job.command);
+        try output.string(job.log_path);
+    }
+    return .{ .payload = try output.finish() };
 }
 
 fn attachInfo(registry: *Registry, allocator: std.mem.Allocator, payload: []u8) !Response {
@@ -1136,6 +1602,19 @@ fn createPty(io: std.Io, tty_path: []const u8) !PtyPair {
         .master = .{ .handle = master_fd, .flags = .{ .nonblocking = false } },
         .slave = .{ .handle = slave_fd, .flags = .{ .nonblocking = false } },
     };
+}
+
+fn currentTerminalSize(io: std.Io) std.posix.winsize {
+    var size: std.posix.winsize = .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
+    const result = io.operate(.{ .device_io_control = .{
+        .file = std.Io.File.stdin(),
+        .code = std.posix.T.IOCGWINSZ,
+        .arg = &size,
+    } }) catch return size;
+    if (result.device_io_control < 0 or size.row == 0 or size.col == 0) {
+        return .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
+    }
+    return size;
 }
 
 fn terminalSize(io: std.Io, tty_path: []const u8) std.posix.winsize {
