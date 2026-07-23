@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const version: u16 = 1;
+pub const version: u16 = 2;
 pub const max_payload: usize = 16 * 1024 * 1024;
 const magic = "VAI1";
 
@@ -13,6 +13,9 @@ pub const Kind = enum(u8) {
     remove_job = 6,
     remove_session = 7,
     session_outputs = 8,
+    attach_info = 9,
+    pty_input = 10,
+    pty_resize = 11,
     response_ok = 100,
     response_error = 101,
 };

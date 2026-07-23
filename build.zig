@@ -19,6 +19,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe.root_module.addImport("toml", ztoml.module("toml"));
+    exe.root_module.linkSystemLibrary("util", .{});
 
     b.installArtifact(exe);
 

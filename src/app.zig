@@ -25,9 +25,11 @@ pub fn run(self: *const App, args: []const []const u8) !void {
 }
 
 pub fn help(self: *const App) void {
-    Color.normal("Usage: vai [-b|--bg [--persistent]] <command> [arguments]\n", .{});
+    Color.normal("Usage: vai [-b|--bg [-t] [--persistent]] <command> [arguments]\n", .{});
+    Color.normal("       vai -bt [--persistent] <command> [arguments]\n", .{});
     Color.normal("       vai -l|--list [jobs|sessions]\n", .{});
     Color.normal("       vai -o|--output [job] [-f|--follow]\n", .{});
+    Color.normal("       vai -a|--attach <pty-job>\n", .{});
     Color.normal("       vai --rm <j|s-prefixed-id>\n", .{});
     Color.normal("       vai --mode <session>\n", .{});
     Color.normal("       vai -d|--daemon\n\n", .{});

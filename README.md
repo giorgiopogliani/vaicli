@@ -24,9 +24,13 @@ vai up
 vai -b pnpm dev
 vai --bg pnpm dev
 vai -b --persistent pnpm dev
+vai -b -t pnpm dev  # PTY job
+vai -bt pnpm dev    # equivalent shorthand
 ```
 
 The CLI returns after the daemon starts the job. Each job runs in its own process group and writes combined stdout/stderr to its log file.
+
+Normal `-b` jobs retain the existing non-interactive behavior. Adding `-t` creates a pseudo-terminal: the child starts a POSIX session with the PTY slave as its controlling terminal, and stdin/stdout/stderr use that slave. A daemon thread continuously drains the PTY master into the job log, so PTY output remains available through `-o` and `-o -f`.
 
 List jobs (the default list target) or sessions:
 
@@ -46,6 +50,15 @@ vai -o j1 -f       # one job, then follow
 ```
 
 Combined session output uses colored job headers to identify its source. Background jobs receive `FORCE_COLOR=1` and `CLICOLOR_FORCE=1`; output replay preserves stored ANSI colors. Programs that ignore these variables may still require their own `--color=always` option.
+
+Attach the current terminal to a running PTY job:
+
+```sh
+vai -a j1
+# or: vai --attach j1
+```
+
+Attachment replays captured output, forwards keyboard input, and propagates terminal-size changes. Press `Ctrl-]` to detach without stopping the job. Plain background jobs and exited jobs cannot be attached.
 
 Remove jobs or sessions from daemon state:
 

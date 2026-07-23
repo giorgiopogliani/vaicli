@@ -23,6 +23,9 @@ pub fn main(init: std.process.Init) !void {
     {
         return Sessions.runDaemon(init.gpa, arena, init.io, init.environ_map);
     }
+    if (args.len >= 3 and std.mem.eql(u8, args[1], "--pty-child")) {
+        return Sessions.runPtyChild(init.io, args[2..]);
+    }
     // Keep the existing config and dotenv order: config comes from the process
     // environment, then the command environment is overlaid by .env.
     var loader = ConfigLoader.init(init.gpa, init.io, init.environ_map);

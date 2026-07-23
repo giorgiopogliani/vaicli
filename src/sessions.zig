@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const protocol = @import("protocol.zig");
 const Paths = @import("paths.zig").Paths;
 const Config = @import("config.zig");
@@ -20,18 +21,22 @@ pub const Cli = struct {
         if (args.len == 0) return false;
         return std.mem.eql(u8, args[0], "--bg") or
             std.mem.eql(u8, args[0], "-b") or
+            std.mem.eql(u8, args[0], "-bt") or
             std.mem.eql(u8, args[0], "--persistent") or
             std.mem.eql(u8, args[0], "--list") or
             std.mem.eql(u8, args[0], "-l") or
             std.mem.eql(u8, args[0], "--rm") or
             std.mem.eql(u8, args[0], "--output") or
             std.mem.eql(u8, args[0], "-o") or
+            std.mem.eql(u8, args[0], "--attach") or
+            std.mem.eql(u8, args[0], "-a") or
             std.mem.eql(u8, args[0], "--mode");
     }
 
     pub fn run(self: *Cli, args: []const []const u8) !void {
         if (std.mem.eql(u8, args[0], "--bg") or
             std.mem.eql(u8, args[0], "-b") or
+            std.mem.eql(u8, args[0], "-bt") or
             std.mem.eql(u8, args[0], "--persistent"))
         {
             return self.start(args);
@@ -42,6 +47,9 @@ pub const Cli = struct {
         if (std.mem.eql(u8, args[0], "--rm")) return self.remove(args[1..]);
         if (std.mem.eql(u8, args[0], "--output") or std.mem.eql(u8, args[0], "-o")) {
             return self.output(args[1..]);
+        }
+        if (std.mem.eql(u8, args[0], "--attach") or std.mem.eql(u8, args[0], "-a")) {
+            return self.attach(args[1..]);
         }
         if (std.mem.eql(u8, args[0], "--mode")) return self.mode(args[1..]);
         return error.InvalidArguments;
@@ -213,11 +221,135 @@ pub const Cli = struct {
         return true;
     }
 
+    const AttachInfo = struct {
+        path: []u8,
+        running: bool,
+    };
+
+    fn attach(self: *Cli, args: []const []const u8) !void {
+        if (args.len != 1) return error.InvalidArguments;
+        const id = try parseId(args[0], 'j');
+        var info = try self.attachInfo(args[0]);
+        defer self.allocator.free(info.path);
+        if (!info.running) return error.JobNotRunning;
+
+        const tty_path = try controllingTty(self.allocator);
+        defer self.allocator.free(tty_path);
+        const original = try std.posix.tcgetattr(std.posix.STDIN_FILENO);
+        var raw = original;
+        cfmakeraw(&raw);
+
+        try self.stdout.print("\x1b[36mattached to j{d}; Ctrl-] detaches\x1b[0m\r\n", .{id});
+        try self.stdout.flush();
+        try std.posix.tcsetattr(std.posix.STDIN_FILENO, .NOW, raw);
+        defer std.posix.tcsetattr(std.posix.STDIN_FILENO, .NOW, original) catch {};
+
+        var size = terminalSize(self.io, tty_path);
+        self.sendPtyResize(args[0], size) catch {};
+        var source: OutputSource = .{ .id = id, .path = info.path };
+        _ = try self.writeAvailable(&source, false);
+        try self.stdout.flush();
+
+        var iteration: usize = 0;
+        var detached = false;
+        while (info.running) : (iteration += 1) {
+            var poll_fds = [_]std.posix.pollfd{.{
+                .fd = std.posix.STDIN_FILENO,
+                .events = std.posix.POLL.IN | std.posix.POLL.HUP,
+                .revents = 0,
+            }};
+            _ = try std.posix.poll(&poll_fds, 50);
+            if (poll_fds[0].revents & std.posix.POLL.IN != 0) {
+                var input_buffer: [4096]u8 = undefined;
+                const amount = std.Io.File.stdin().readStreaming(self.io, &.{&input_buffer}) catch |err| switch (err) {
+                    error.EndOfStream => 0,
+                    else => return err,
+                };
+                if (amount > 0) {
+                    if (std.mem.indexOfScalar(u8, input_buffer[0..amount], 0x1d)) |detach_at| {
+                        if (detach_at > 0) try self.sendPtyInput(args[0], input_buffer[0..detach_at]);
+                        detached = true;
+                        break;
+                    }
+                    try self.sendPtyInput(args[0], input_buffer[0..amount]);
+                }
+            }
+
+            if (try self.writeAvailable(&source, false)) try self.stdout.flush();
+            if (iteration % 10 == 0) {
+                const current_size = terminalSize(self.io, tty_path);
+                if (!sameTerminalSize(size, current_size)) {
+                    size = current_size;
+                    self.sendPtyResize(args[0], size) catch {};
+                }
+                const status = try self.attachInfo(args[0]);
+                defer self.allocator.free(status.path);
+                info.running = status.running;
+            }
+        }
+        _ = try self.writeAvailable(&source, false);
+        try self.stdout.print("\r\n\x1b[36m{s} j{d}\x1b[0m\r\n", .{
+            if (detached) "detached from" else "job exited",
+            id,
+        });
+        try self.stdout.flush();
+    }
+
+    fn attachInfo(self: *Cli, id: []const u8) !AttachInfo {
+        const response = try self.idRequest(.attach_info, id, null);
+        defer response.deinit(self.allocator);
+        if (response.kind == .response_error) {
+            try self.printResponse(response);
+            return error.DaemonRequestFailed;
+        }
+        var reader = protocol.PayloadReader.init(response.payload);
+        const uses_pty = try reader.boolean();
+        const running = try reader.boolean();
+        const path = try reader.string();
+        if (!reader.done()) return error.TrailingPayload;
+        if (!uses_pty) return error.JobHasNoPty;
+        return .{ .path = try self.allocator.dupe(u8, path), .running = running };
+    }
+
+    fn sendPtyInput(self: *Cli, id: []const u8, input: []const u8) !void {
+        var payload = protocol.PayloadWriter.init(self.allocator);
+        defer payload.deinit();
+        try payload.string(id);
+        try payload.string(input);
+        const bytes = try payload.finish();
+        defer self.allocator.free(bytes);
+        const response = try self.request(.pty_input, bytes);
+        defer response.deinit(self.allocator);
+        if (response.kind == .response_error) return self.printResponse(response);
+    }
+
+    fn sendPtyResize(self: *Cli, id: []const u8, size: std.posix.winsize) !void {
+        var payload = protocol.PayloadWriter.init(self.allocator);
+        defer payload.deinit();
+        try payload.string(id);
+        try payload.integer(size.row);
+        try payload.integer(size.col);
+        const bytes = try payload.finish();
+        defer self.allocator.free(bytes);
+        const response = try self.request(.pty_resize, bytes);
+        defer response.deinit(self.allocator);
+        if (response.kind == .response_error) return error.ResizeUnavailable;
+    }
+
     fn start(self: *Cli, args: []const []const u8) !void {
         var persistent = false;
+        var use_pty = false;
         var index: usize = 0;
         while (index < args.len) : (index += 1) {
             if (std.mem.eql(u8, args[index], "--bg") or std.mem.eql(u8, args[index], "-b")) continue;
+            if (std.mem.eql(u8, args[index], "-t")) {
+                use_pty = true;
+                continue;
+            }
+            if (std.mem.eql(u8, args[index], "-bt")) {
+                use_pty = true;
+                continue;
+            }
             if (std.mem.eql(u8, args[index], "--persistent")) {
                 persistent = true;
                 continue;
@@ -245,14 +377,15 @@ pub const Cli = struct {
             with_command[2] = shell_args[2];
             with_command[3] = expanded.?;
             command_args = with_command;
-            return self.sendStart(persistent, tty, cwd, command_args);
+            return self.sendStart(persistent, use_pty, tty, cwd, command_args);
         }
-        return self.sendStart(persistent, tty, cwd, command_args);
+        return self.sendStart(persistent, use_pty, tty, cwd, command_args);
     }
 
     fn sendStart(
         self: *Cli,
         persistent: bool,
+        use_pty: bool,
         tty: []const u8,
         cwd: []const u8,
         command_args: []const []const u8,
@@ -260,6 +393,7 @@ pub const Cli = struct {
         var payload = protocol.PayloadWriter.init(self.allocator);
         defer payload.deinit();
         try payload.boolean(persistent);
+        try payload.boolean(use_pty);
         try payload.string(tty);
         try payload.string(cwd);
         try payload.integer(command_args.len);
@@ -365,6 +499,8 @@ const Job = struct {
     pgid: std.posix.pid_t,
     command: []const u8,
     log_path: []const u8,
+    uses_pty: bool,
+    pty_master: ?std.Io.File = null,
     active: bool = true,
     status: JobStatus = .running,
     exit_code: ?u8 = null,
@@ -389,6 +525,7 @@ const Registry = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     paths: Paths,
+    exe_path: []const u8,
     mutex: Mutex,
     sessions: std.ArrayList(*Session) = .empty,
     jobs: std.ArrayList(*Job) = .empty,
@@ -447,6 +584,12 @@ const Registry = struct {
 };
 
 const ReapContext = struct { registry: *Registry, job: *Job, child: std.process.Child };
+const PtyDrainContext = struct {
+    registry: *Registry,
+    job: *Job,
+    master: std.Io.File,
+    log: std.Io.File,
+};
 const StopContext = struct { registry: *Registry, job: *Job };
 const WatcherContext = struct { registry: *Registry, session: *Session, generation: u64 };
 
@@ -469,6 +612,29 @@ fn reapJob(context: *ReapContext) void {
             context.job.signal = signal;
         },
         else => context.job.status = .failed,
+    }
+}
+
+fn drainPty(context: *PtyDrainContext) void {
+    defer context.master.close(context.registry.io);
+    defer context.log.close(context.registry.io);
+    defer {
+        context.registry.mutex.lock();
+        defer context.registry.mutex.unlock();
+        context.job.pty_master = null;
+    }
+
+    var buffer: [16 * 1024]u8 = undefined;
+    while (true) {
+        const amount = context.master.readStreaming(context.registry.io, &.{&buffer}) catch |err| switch (err) {
+            error.EndOfStream, error.InputOutput => return,
+            else => return,
+        };
+        if (amount == 0) {
+            std.Io.sleep(context.registry.io, .fromMilliseconds(10), .awake) catch {};
+            continue;
+        }
+        context.log.writeStreamingAll(context.registry.io, buffer[0..amount]) catch return;
     }
 }
 
@@ -519,6 +685,17 @@ fn watchTty(context: *WatcherContext) void {
     }
 }
 
+pub fn runPtyChild(io: std.Io, argv: []const []const u8) !void {
+    if (argv.len == 0) return error.MissingCommand;
+    const slave = std.c.dup(std.posix.STDIN_FILENO);
+    if (slave < 0) return error.DuplicatePtySlaveFailed;
+    if (login_tty(slave) != 0) {
+        _ = std.c.close(slave);
+        return error.LoginTtyFailed;
+    }
+    return std.process.replace(io, .{ .argv = argv });
+}
+
 pub fn runDaemon(
     gpa: std.mem.Allocator,
     allocator: std.mem.Allocator,
@@ -539,11 +716,13 @@ pub fn runDaemon(
     };
     defer lock_file.close(io);
 
+    const exe_path = try std.process.executablePathAlloc(io, allocator);
     var registry: Registry = .{
         .gpa = gpa,
         .allocator = allocator,
         .io = io,
         .paths = paths,
+        .exe_path = exe_path,
         .mutex = .{ .io = io },
     };
 
@@ -601,6 +780,9 @@ fn handleRequest(registry: *Registry, allocator: std.mem.Allocator, frame: proto
         .remove_job => removeJob(registry, allocator, frame.payload),
         .remove_session => removeSession(registry, allocator, frame.payload),
         .session_outputs => sessionOutputs(registry, allocator, frame.payload),
+        .attach_info => attachInfo(registry, allocator, frame.payload),
+        .pty_input => ptyInput(registry, frame.payload),
+        .pty_resize => ptyResize(registry, frame.payload),
         else => error.InvalidRequest,
     };
 }
@@ -608,6 +790,7 @@ fn handleRequest(registry: *Registry, allocator: std.mem.Allocator, frame: proto
 fn handleStart(registry: *Registry, allocator: std.mem.Allocator, payload: []u8) !Response {
     var reader = protocol.PayloadReader.init(payload);
     const persistent = try reader.boolean();
+    const use_pty = try reader.boolean();
     const tty = try reader.string();
     const cwd = try reader.string();
     const argc = try reader.integer();
@@ -648,9 +831,34 @@ fn handleStart(registry: *Registry, allocator: std.mem.Allocator, payload: []u8)
     registry.next_job_id += 1;
     const log_path = try std.fmt.allocPrint(registry.allocator, "{s}/job-{d}.log", .{ registry.paths.logs_dir, job_id });
     const log_file = try std.Io.Dir.cwd().createFile(registry.io, log_path, .{ .permissions = .fromMode(0o600) });
-    defer log_file.close(registry.io);
+    var log_transferred = false;
+    defer if (!log_transferred) log_file.close(registry.io);
 
-    const child = try std.process.spawn(registry.io, .{
+    var pty_master: ?std.Io.File = null;
+    var pty_slave: ?std.Io.File = null;
+    errdefer if (pty_master) |master| master.close(registry.io);
+    errdefer if (pty_slave) |slave| slave.close(registry.io);
+
+    const child = if (use_pty) blk: {
+        const pty = try createPty(registry.io, tty);
+        pty_master = pty.master;
+        pty_slave = pty.slave;
+        const bootstrap_argv = try allocator.alloc([]const u8, argv.len + 2);
+        bootstrap_argv[0] = registry.exe_path;
+        bootstrap_argv[1] = "--pty-child";
+        @memcpy(bootstrap_argv[2..], argv);
+        const spawned = try std.process.spawn(registry.io, .{
+            .argv = bootstrap_argv,
+            .cwd = .{ .path = cwd },
+            .environ_map = &env,
+            .stdin = .{ .file = pty.slave },
+            .stdout = .{ .file = pty.slave },
+            .stderr = .{ .file = pty.slave },
+        });
+        pty.slave.close(registry.io);
+        pty_slave = null;
+        break :blk spawned;
+    } else try std.process.spawn(registry.io, .{
         .argv = argv,
         .cwd = .{ .path = cwd },
         .environ_map = &env,
@@ -668,16 +876,36 @@ fn handleStart(registry: *Registry, allocator: std.mem.Allocator, payload: []u8)
         .pgid = pid,
         .command = try registry.allocator.dupe(u8, argv[0]),
         .log_path = log_path,
+        .uses_pty = use_pty,
+        .pty_master = pty_master,
     };
     try registry.jobs.append(registry.allocator, job);
     try session.jobs.append(registry.allocator, job);
+
+    if (pty_master) |master| {
+        const drain_context = try registry.allocator.create(PtyDrainContext);
+        drain_context.* = .{
+            .registry = registry,
+            .job = job,
+            .master = master,
+            .log = log_file,
+        };
+        const drain_thread = try std.Thread.spawn(.{}, drainPty, .{drain_context});
+        drain_thread.detach();
+        log_transferred = true;
+        pty_master = null;
+    }
 
     const context = try registry.allocator.create(ReapContext);
     context.* = .{ .registry = registry, .job = job, .child = child };
     const thread = try std.Thread.spawn(.{}, reapJob, .{context});
     thread.detach();
 
-    return .{ .payload = try std.fmt.allocPrint(allocator, "started job j{d} in session s{d}\n", .{ job.id, session.id }) };
+    return .{ .payload = try std.fmt.allocPrint(
+        allocator,
+        "started {s}job j{d} in session s{d}\n",
+        .{ if (use_pty) "PTY " else "", job.id, session.id },
+    ) };
 }
 
 fn listJobs(registry: *Registry, allocator: std.mem.Allocator) !Response {
@@ -685,10 +913,16 @@ fn listJobs(registry: *Registry, allocator: std.mem.Allocator) !Response {
     defer registry.mutex.unlock();
     var output: std.Io.Writer.Allocating = .init(allocator);
     errdefer output.deinit();
-    try output.writer.writeAll("JOB\tSESSION\tPID\tSTATUS\tCOMMAND\n");
+    try output.writer.writeAll("JOB\tSESSION\tPID\tMODE\tSTATUS\tCOMMAND\n");
     for (registry.jobs.items) |job| {
         if (!job.active) continue;
-        try output.writer.print("j{d}\ts{d}\t{d}\t{s}", .{ job.id, job.session_id, job.pid, @tagName(job.status) });
+        try output.writer.print("j{d}\ts{d}\t{d}\t{s}\t{s}", .{
+            job.id,
+            job.session_id,
+            job.pid,
+            if (job.uses_pty) "pty" else "plain",
+            @tagName(job.status),
+        });
         if (job.exit_code) |code| try output.writer.print("({d})", .{code});
         if (job.signal) |signal| try output.writer.print("({s})", .{@tagName(signal)});
         try output.writer.print("\t{s}\n", .{job.command});
@@ -716,6 +950,61 @@ fn listSessions(registry: *Registry, allocator: std.mem.Allocator) !Response {
         });
     }
     return .{ .payload = try output.toOwnedSlice() };
+}
+
+fn attachInfo(registry: *Registry, allocator: std.mem.Allocator, payload: []u8) !Response {
+    var reader = protocol.PayloadReader.init(payload);
+    const id = try parseId(try reader.string(), 'j');
+    if (!reader.done()) return error.TrailingPayload;
+
+    registry.mutex.lock();
+    defer registry.mutex.unlock();
+    const job = registry.findJob(id) orelse return error.JobNotFound;
+    var output = protocol.PayloadWriter.init(allocator);
+    defer output.deinit();
+    try output.boolean(job.uses_pty);
+    try output.boolean(job.status == .running or job.status == .stopping);
+    try output.string(job.log_path);
+    return .{ .payload = try output.finish() };
+}
+
+fn ptyInput(registry: *Registry, payload: []u8) !Response {
+    var reader = protocol.PayloadReader.init(payload);
+    const id = try parseId(try reader.string(), 'j');
+    const input = try reader.string();
+    if (!reader.done()) return error.TrailingPayload;
+
+    registry.mutex.lock();
+    defer registry.mutex.unlock();
+    const job = registry.findJob(id) orelse return error.JobNotFound;
+    if (!job.uses_pty) return error.JobHasNoPty;
+    if (job.status != .running) return error.JobNotRunning;
+    const master = job.pty_master orelse return error.PtyClosed;
+    try master.writeStreamingAll(registry.io, input);
+    return .{ .payload = "" };
+}
+
+fn ptyResize(registry: *Registry, payload: []u8) !Response {
+    var reader = protocol.PayloadReader.init(payload);
+    const id = try parseId(try reader.string(), 'j');
+    const rows = try reader.integer();
+    const columns = try reader.integer();
+    if (!reader.done()) return error.TrailingPayload;
+    if (rows > std.math.maxInt(u16) or columns > std.math.maxInt(u16)) return error.InvalidTerminalSize;
+
+    registry.mutex.lock();
+    defer registry.mutex.unlock();
+    const job = registry.findJob(id) orelse return error.JobNotFound;
+    if (!job.uses_pty) return error.JobHasNoPty;
+    const master = job.pty_master orelse return error.PtyClosed;
+    var size: std.posix.winsize = .{
+        .row = @intCast(rows),
+        .col = @intCast(columns),
+        .xpixel = 0,
+        .ypixel = 0,
+    };
+    if (ioctl(master.handle, terminalResizeCode(), &size) != 0) return error.ResizePtyFailed;
+    return .{ .payload = "" };
 }
 
 fn sessionOutputs(registry: *Registry, allocator: std.mem.Allocator, payload: []u8) !Response {
@@ -821,6 +1110,49 @@ fn toggleSessionMode(
     ) };
 }
 
+fn terminalResizeCode() u32 {
+    return switch (builtin.os.tag) {
+        .linux => std.os.linux.T.IOCSWINSZ,
+        .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => 0x80087467,
+        else => @compileError("PTY resize requires a POSIX TIOCSWINSZ implementation"),
+    };
+}
+
+fn sameTerminalSize(a: std.posix.winsize, b: std.posix.winsize) bool {
+    return a.row == b.row and a.col == b.col and a.xpixel == b.xpixel and a.ypixel == b.ypixel;
+}
+
+const PtyPair = struct {
+    master: std.Io.File,
+    slave: std.Io.File,
+};
+
+fn createPty(io: std.Io, tty_path: []const u8) !PtyPair {
+    var master_fd: c_int = undefined;
+    var slave_fd: c_int = undefined;
+    var size = terminalSize(io, tty_path);
+    if (openpty(&master_fd, &slave_fd, null, null, &size) != 0) return error.OpenPtyFailed;
+    return .{
+        .master = .{ .handle = master_fd, .flags = .{ .nonblocking = false } },
+        .slave = .{ .handle = slave_fd, .flags = .{ .nonblocking = false } },
+    };
+}
+
+fn terminalSize(io: std.Io, tty_path: []const u8) std.posix.winsize {
+    var size: std.posix.winsize = .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
+    const tty = std.Io.Dir.cwd().openFile(io, tty_path, .{ .mode = .read_only }) catch return size;
+    defer tty.close(io);
+    const result = io.operate(.{ .device_io_control = .{
+        .file = tty,
+        .code = std.posix.T.IOCGWINSZ,
+        .arg = &size,
+    } }) catch return size;
+    if (result.device_io_control < 0) {
+        size = .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
+    }
+    return size;
+}
+
 fn parseId(text: []const u8, prefix: u8) !u64 {
     const digits = if (text.len > 0 and text[0] == prefix) text[1..] else text;
     if (digits.len == 0) return error.InvalidId;
@@ -835,7 +1167,17 @@ fn controllingTty(allocator: std.mem.Allocator) ![]u8 {
 }
 
 extern "c" fn ttyname(fd: c_int) ?[*:0]u8;
+extern "c" fn cfmakeraw(termios_p: *std.posix.termios) void;
 extern "c" fn daemon(nochdir: c_int, noclose: c_int) c_int;
+extern "c" fn login_tty(fd: c_int) c_int;
+extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
+extern "c" fn openpty(
+    amaster: *c_int,
+    aslave: *c_int,
+    name: ?[*]u8,
+    termp: ?*std.posix.termios,
+    winp: ?*std.posix.winsize,
+) c_int;
 fn c_ttyname(fd: c_int) ?[*:0]u8 {
     return ttyname(fd);
 }
