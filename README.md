@@ -21,8 +21,9 @@ vai up
 ## Background jobs
 
 ```sh
+vai -b pnpm dev
 vai --bg pnpm dev
-vai --bg --persistent pnpm dev
+vai -b --persistent pnpm dev
 ```
 
 The CLI returns after the daemon starts the job. Each job runs in its own process group and writes combined stdout/stderr to its log file.
@@ -35,15 +36,16 @@ vai --list jobs
 vai --list sessions
 ```
 
-Inspect or stop a job:
+Inspect or follow output:
 
 ```sh
-vai --output <job>
-# or: vai -o <job>
-vai stop <job>
+vai -o j1          # one job
+vai -o             # all jobs in the current session
+vai -o -f          # all current-session output, then follow
+vai -o j1 -f       # one job, then follow
 ```
 
-Background jobs receive `FORCE_COLOR=1` and `CLICOLOR_FORCE=1`; output replay preserves stored ANSI colors. Programs that ignore these variables may still require their own `--color=always` option.
+Combined session output uses colored job headers to identify its source. Background jobs receive `FORCE_COLOR=1` and `CLICOLOR_FORCE=1`; output replay preserves stored ANSI colors. Programs that ignore these variables may still require their own `--color=always` option.
 
 Remove jobs or sessions from daemon state:
 
@@ -52,7 +54,7 @@ vai --rm j1
 vai --rm s1
 ```
 
-Removing a running object first sends `SIGTERM` to its process group. The daemon follows with `SIGKILL` after the stop timeout if it is still running.
+Removing a running object first sends `SIGTERM` to its process group. The daemon follows with `SIGKILL` after the stop timeout if it is still running. Removing a job deletes its log; removing a session deletes every job log associated with that session. Normally exited jobs retain their logs until removed.
 
 Toggle a session between ephemeral and persistent mode:
 

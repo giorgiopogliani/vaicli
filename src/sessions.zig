@@ -19,18 +19,21 @@ pub const Cli = struct {
     pub fn handles(args: []const []const u8) bool {
         if (args.len == 0) return false;
         return std.mem.eql(u8, args[0], "--bg") or
+            std.mem.eql(u8, args[0], "-b") or
             std.mem.eql(u8, args[0], "--persistent") or
             std.mem.eql(u8, args[0], "--list") or
             std.mem.eql(u8, args[0], "-l") or
             std.mem.eql(u8, args[0], "--rm") or
             std.mem.eql(u8, args[0], "--output") or
             std.mem.eql(u8, args[0], "-o") or
-            std.mem.eql(u8, args[0], "--mode") or
-            std.mem.eql(u8, args[0], "stop");
+            std.mem.eql(u8, args[0], "--mode");
     }
 
     pub fn run(self: *Cli, args: []const []const u8) !void {
-        if (std.mem.eql(u8, args[0], "--bg") or std.mem.eql(u8, args[0], "--persistent")) {
+        if (std.mem.eql(u8, args[0], "--bg") or
+            std.mem.eql(u8, args[0], "-b") or
+            std.mem.eql(u8, args[0], "--persistent"))
+        {
             return self.start(args);
         }
         if (std.mem.eql(u8, args[0], "--list") or std.mem.eql(u8, args[0], "-l")) {
@@ -38,25 +41,7 @@ pub const Cli = struct {
         }
         if (std.mem.eql(u8, args[0], "--rm")) return self.remove(args[1..]);
         if (std.mem.eql(u8, args[0], "--output") or std.mem.eql(u8, args[0], "-o")) {
-            if (args.len != 2) return error.InvalidArguments;
-            const response = try self.idRequest(.job_logs, args[1], null);
-            defer response.deinit(self.allocator);
-            if (response.kind == .response_error) return self.printResponse(response);
-            const content = try std.Io.Dir.cwd().readFileAlloc(
-                self.io,
-                response.payload,
-                self.allocator,
-                .limited(64 * 1024 * 1024),
-            );
-            defer self.allocator.free(content);
-            try self.stdout.writeAll(content);
-            return self.stdout.flush();
-        }
-        if (std.mem.eql(u8, args[0], "stop")) {
-            if (args.len != 2) return error.InvalidArguments;
-            const response = try self.idRequest(.stop_job, args[1], null);
-            defer response.deinit(self.allocator);
-            return self.printResponse(response);
+            return self.output(args[1..]);
         }
         if (std.mem.eql(u8, args[0], "--mode")) return self.mode(args[1..]);
         return error.InvalidArguments;
@@ -87,11 +72,152 @@ pub const Cli = struct {
         return self.printResponse(response);
     }
 
+    const OutputSource = struct {
+        id: u64,
+        path: []u8,
+        offset: u64 = 0,
+    };
+
+    fn output(self: *Cli, args: []const []const u8) !void {
+        var follow = false;
+        var job_id: ?[]const u8 = null;
+        for (args) |arg| {
+            if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--follow")) {
+                if (follow) return error.InvalidArguments;
+                follow = true;
+            } else if (job_id == null) {
+                job_id = arg;
+            } else {
+                return error.InvalidArguments;
+            }
+        }
+
+        var sources: std.ArrayList(OutputSource) = .empty;
+        defer {
+            for (sources.items) |source| self.allocator.free(source.path);
+            sources.deinit(self.allocator);
+        }
+
+        if (job_id) |id| {
+            const response = try self.idRequest(.job_logs, id, null);
+            defer response.deinit(self.allocator);
+            if (response.kind == .response_error) return self.printResponse(response);
+            try sources.append(self.allocator, .{
+                .id = try parseId(id, 'j'),
+                .path = try self.allocator.dupe(u8, response.payload),
+            });
+            if (follow) return self.followOutput(&sources, null);
+            _ = try self.writeAvailable(&sources.items[0], false);
+            return self.stdout.flush();
+        }
+
+        const tty = try controllingTty(self.allocator);
+        defer self.allocator.free(tty);
+        try self.refreshSessionOutputs(&sources, tty);
+        if (follow) return self.followOutput(&sources, tty);
+        for (sources.items) |*source| _ = try self.writeAvailable(source, true);
+        return self.stdout.flush();
+    }
+
+    fn refreshSessionOutputs(
+        self: *Cli,
+        sources: *std.ArrayList(OutputSource),
+        tty: []const u8,
+    ) !void {
+        var payload = protocol.PayloadWriter.init(self.allocator);
+        defer payload.deinit();
+        try payload.string(tty);
+        const bytes = try payload.finish();
+        defer self.allocator.free(bytes);
+
+        const response = try self.request(.session_outputs, bytes);
+        defer response.deinit(self.allocator);
+        if (response.kind == .response_error) return self.printResponse(response);
+
+        var reader = protocol.PayloadReader.init(response.payload);
+        const count = try reader.integer();
+        if (count > max_items) return error.InvalidJobCount;
+        for (0..@intCast(count)) |_| {
+            const id = try reader.integer();
+            const path = try reader.string();
+            for (sources.items) |source| {
+                if (source.id == id) break;
+            } else {
+                try sources.append(self.allocator, .{
+                    .id = id,
+                    .path = try self.allocator.dupe(u8, path),
+                });
+            }
+        }
+        if (!reader.done()) return error.TrailingPayload;
+    }
+
+    fn followOutput(
+        self: *Cli,
+        sources: *std.ArrayList(OutputSource),
+        tty: ?[]const u8,
+    ) !void {
+        var iteration: usize = 0;
+        var last_source: ?u64 = null;
+        while (true) : (iteration += 1) {
+            if (tty) |path| {
+                if (iteration % 10 == 0) try self.refreshSessionOutputs(sources, path);
+            }
+
+            var wrote = false;
+            for (sources.items) |*source| {
+                const has_output = try self.hasAvailable(source);
+                if (!has_output) continue;
+                const show_header = sources.items.len > 1 and last_source != source.id;
+                _ = try self.writeAvailable(source, show_header);
+                last_source = source.id;
+                wrote = true;
+            }
+            if (wrote) try self.stdout.flush();
+            try std.Io.sleep(self.io, .fromMilliseconds(100), .awake);
+        }
+    }
+
+    fn hasAvailable(self: *Cli, source: *OutputSource) !bool {
+        const file = std.Io.Dir.cwd().openFile(self.io, source.path, .{}) catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => return err,
+        };
+        defer file.close(self.io);
+        const length = try file.length(self.io);
+        if (length < source.offset) source.offset = 0;
+        return length > source.offset;
+    }
+
+    fn writeAvailable(self: *Cli, source: *OutputSource, show_header: bool) !bool {
+        const file = std.Io.Dir.cwd().openFile(self.io, source.path, .{}) catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => return err,
+        };
+        defer file.close(self.io);
+        const length = try file.length(self.io);
+        if (length < source.offset) source.offset = 0;
+        if (length == source.offset) return false;
+
+        if (show_header) {
+            try self.stdout.print("\x1b[36m==> j{d} <==\x1b[0m\n", .{source.id});
+        }
+        var buffer: [16 * 1024]u8 = undefined;
+        while (source.offset < length) {
+            const remaining: usize = @intCast(@min(length - source.offset, buffer.len));
+            const amount = try file.readPositionalAll(self.io, buffer[0..remaining], source.offset);
+            if (amount == 0) break;
+            try self.stdout.writeAll(buffer[0..amount]);
+            source.offset += amount;
+        }
+        return true;
+    }
+
     fn start(self: *Cli, args: []const []const u8) !void {
         var persistent = false;
         var index: usize = 0;
         while (index < args.len) : (index += 1) {
-            if (std.mem.eql(u8, args[index], "--bg")) continue;
+            if (std.mem.eql(u8, args[index], "--bg") or std.mem.eql(u8, args[index], "-b")) continue;
             if (std.mem.eql(u8, args[index], "--persistent")) {
                 persistent = true;
                 continue;
@@ -470,11 +596,11 @@ fn handleRequest(registry: *Registry, allocator: std.mem.Allocator, frame: proto
         .start_job => handleStart(registry, allocator, frame.payload),
         .list_jobs => listJobs(registry, allocator),
         .job_logs => jobLogs(registry, frame.payload),
-        .stop_job => stopJobRequest(registry, allocator, frame.payload),
         .list_sessions => listSessions(registry, allocator),
         .toggle_session_mode => toggleSessionMode(registry, allocator, frame.payload),
         .remove_job => removeJob(registry, allocator, frame.payload),
         .remove_session => removeSession(registry, allocator, frame.payload),
+        .session_outputs => sessionOutputs(registry, allocator, frame.payload),
         else => error.InvalidRequest,
     };
 }
@@ -592,6 +718,29 @@ fn listSessions(registry: *Registry, allocator: std.mem.Allocator) !Response {
     return .{ .payload = try output.toOwnedSlice() };
 }
 
+fn sessionOutputs(registry: *Registry, allocator: std.mem.Allocator, payload: []u8) !Response {
+    var reader = protocol.PayloadReader.init(payload);
+    const tty = try reader.string();
+    if (!reader.done()) return error.TrailingPayload;
+
+    registry.mutex.lock();
+    defer registry.mutex.unlock();
+    const session = registry.findSessionByTty(tty) orelse return error.SessionNotFound;
+    var output = protocol.PayloadWriter.init(allocator);
+    defer output.deinit();
+    var count: u64 = 0;
+    for (session.jobs.items) |job| if (job.active) {
+        count += 1;
+    };
+    try output.integer(count);
+    for (session.jobs.items) |job| {
+        if (!job.active) continue;
+        try output.integer(job.id);
+        try output.string(job.log_path);
+    }
+    return .{ .payload = try output.finish() };
+}
+
 fn jobLogs(registry: *Registry, payload: []u8) !Response {
     var reader = protocol.PayloadReader.init(payload);
     const id = try parseId(try reader.string(), 'j');
@@ -602,17 +751,6 @@ fn jobLogs(registry: *Registry, payload: []u8) !Response {
     return .{ .payload = job.log_path };
 }
 
-fn stopJobRequest(registry: *Registry, allocator: std.mem.Allocator, payload: []u8) !Response {
-    var reader = protocol.PayloadReader.init(payload);
-    const id = try parseId(try reader.string(), 'j');
-    if (!reader.done()) return error.TrailingPayload;
-    registry.mutex.lock();
-    defer registry.mutex.unlock();
-    const job = registry.findJob(id) orelse return error.JobNotFound;
-    registry.stopJob(job);
-    return .{ .payload = try std.fmt.allocPrint(allocator, "stopping job j{d}\n", .{id}) };
-}
-
 fn removeJob(registry: *Registry, allocator: std.mem.Allocator, payload: []u8) !Response {
     var reader = protocol.PayloadReader.init(payload);
     const id = try parseId(try reader.string(), 'j');
@@ -621,6 +759,7 @@ fn removeJob(registry: *Registry, allocator: std.mem.Allocator, payload: []u8) !
     defer registry.mutex.unlock();
     const job = registry.findJob(id) orelse return error.JobNotFound;
     registry.stopJob(job);
+    try deleteJobLog(registry, job);
     job.active = false;
     return .{ .payload = try std.fmt.allocPrint(allocator, "removed job j{d}\n", .{id}) };
 }
@@ -634,10 +773,18 @@ fn removeSession(registry: *Registry, allocator: std.mem.Allocator, payload: []u
     const session = registry.findSession(id) orelse return error.SessionNotFound;
     for (session.jobs.items) |job| {
         registry.stopJob(job);
+        try deleteJobLog(registry, job);
         job.active = false;
     }
     registry.stopSession(session);
     return .{ .payload = try std.fmt.allocPrint(allocator, "removed session s{d}\n", .{id}) };
+}
+
+fn deleteJobLog(registry: *Registry, job: *const Job) !void {
+    std.Io.Dir.cwd().deleteFile(registry.io, job.log_path) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
 }
 
 fn toggleSessionMode(
